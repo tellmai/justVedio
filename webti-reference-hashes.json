@@ -1,0 +1,8 @@
+{
+  "webassistant/gui.py": "b17cca41c22b37a174f6eecb2691c0f3bb1e1b9d688eaaeb8197398f4dc152fa",
+  "webassistant/controller.py": "7513df4bc7182086b9beb8542261fd31d49a4603fb809add9137922f641e594c",
+  "webassistant/models.py": "ac9865854b71e818977ee0092880af373626a7da717701795ef345c92c83f01e",
+  "webassistant/browsers.py": "3f0e2190e8c5d151140bdcff8ae361c3f81d99d968ca0239e86517345aafcfeb",
+  "README.md": "d33265909ccd2abbe36f5a57ad4bb5f6a47e84438d551d463bcfda01a4fa10d5",
+  "使用说明.md": "d16ec9347489c89621eeed4fb2ccc9629acc6cf688205161331de8e69babcba6"
+}
