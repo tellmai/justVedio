@@ -175,7 +175,7 @@ class MetricCard(QFrame):
 
 class PeopleDelegate(QStyledItemDelegate):
     def paint(self, painter, option, index):
-        if index.column() not in (4, 5):
+        if index.column() not in (5, 6):
             super().paint(painter, option, index)
             return
         style_option = QStyleOptionViewItem(option)
@@ -190,7 +190,7 @@ class PeopleDelegate(QStyledItemDelegate):
         painter.setFont(font)
         status = index.data(Qt.UserRole + 1) or "pending"
         foreground, background = COLORS[STATUS_TONES.get(status, "neutral")]
-        if index.column() == 4:
+        if index.column() == 5:
             text = index.data() or ""
             width = min(option.rect.width() - 12, painter.fontMetrics().horizontalAdvance(text) + 18)
             pill = QRectF(option.rect.x() + 6, option.rect.center().y() - 11, width, 23)
@@ -217,7 +217,7 @@ class PeopleDelegate(QStyledItemDelegate):
 
 class PeopleTable(QTableWidget):
     def __init__(self, empty_title, empty_note):
-        super().__init__(0, 8)
+        super().__init__(0, 9)
         self.setItemDelegate(PeopleDelegate(self))
         self.empty_state = QFrame(self.viewport())
         self.empty_state.setObjectName("emptyState")
@@ -276,6 +276,7 @@ def stylesheet():
     QFrame#modeOption { background: #EFF7F5; border: 1px solid #D7EAE4; border-radius: 9px; }
     QLabel#modeDescription { color: #65837D; font-size: 11px; }
     QFrame#workflowCard { background: #F6F8FA; border: none; border-radius: 9px; }
+    QFrame#browserCard { background: #F6F8FA; border: none; border-radius: 9px; }
     QLabel#stepNumber { background: #E6EDF0; color: #6C8490; border-radius: 10px; font-size: 10px; font-weight: 600; }
     QLabel#stepTitle { font-size: 12px; color: #415B69; }
     QLabel#stepNote { color: #7E919D; font-size: 11px; }

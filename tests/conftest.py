@@ -1,19 +1,25 @@
-import base64
 import os
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
 import pytest
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 from justvedio.fixtures import SyntheticSite
 
+
+@pytest.fixture(autouse=True)
+def isolated_application_base(tmp_path, monkeypatch):
+    """Keep auto-loaded identities and outcome files inside the test workspace."""
+    base = tmp_path / 'app-base'
+    monkeypatch.setenv('JUSTVEDIO_BASE', str(base))
+    return base
+
+
 @pytest.fixture
 def local_site():
     with SyntheticSite(Path(__file__).parent/'fixtures/test.webm') as site:
         yield site.origin, site.state
+
 
 @pytest.fixture
 def chrome():

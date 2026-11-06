@@ -35,3 +35,36 @@ def test_bilibili_default_and_future_site_mode():
 def test_bad_video_urls_rejected(url):
     with pytest.raises(ValueError):
         VideoOptions(video_url=url).validate(SiteConfig())
+
+
+def test_folder_merges_identity_files_and_rejects_duplicates(tmp_path):
+    from justvedio.importers import load_identity_folder
+    folder = tmp_path/'人员信息'
+    folder.mkdir()
+    first = Workbook()
+    sheet = first.active
+    sheet.append(['所在的区县','姓名','身份证号'])
+    sheet.append(['黔江区','甲','110101199001010011'])
+    sheet.append(['黔江区','乙','110101199001010022'])
+    first.save(folder/'a.xlsx')
+    first.close()
+    second = Workbook()
+    sheet = second.active
+    sheet.append(['所在的区县','姓名','身份证号'])
+    sheet.append(['黔江区','丙','110101199001010022'])
+    sheet.append(['黔江区','丁','110101199001010033'])
+    second.save(folder/'b.xlsx')
+    second.close()
+    result = load_identity_folder(str(folder))
+    assert [c.name for c in result.candidates] == ['甲', '乙', '丁']
+    assert result.sheet == '2 个文件'
+    assert any('重复' in issue for issue in result.issues)
+    assert len(result.rejected) == 1
+
+
+def test_empty_folder_is_rejected(tmp_path):
+    from justvedio.importers import load_identity_folder
+    folder = tmp_path/'人员信息'
+    folder.mkdir()
+    with pytest.raises(ValueError, match='没有'):
+        load_identity_folder(str(folder))

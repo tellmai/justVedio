@@ -42,11 +42,13 @@ def main():
                             cwd=extract, env=env, timeout=180, startupinfo=startup,
                             creationflags=subprocess.CREATE_NO_WINDOW)
     report = json.loads((output/'gui-smoke.json').read_text(encoding='utf-8'))
-    expected = ('ok', 'frozen', 'brand_matches', 'login_only_available', 'test_without_bank', 'background_checkbox', 'no_tray',
-                'no_answering_ui', 'expiry_enforced', 'identity_import', 'statistics_export', 'ocr_model',
-                'browser_launch', 'bundled_browser', 'video_playback', 'twelve_full_flows', 'identity_isolation',
-                'direct_video_transition', 'desktop_background', 'headless_browser', 'background_execution',
-                'main_window_visible', 'foreground_mode', 'execution_controls_locked', 'power_request_released',
+    expected = ('ok', 'frozen', 'brand_matches', 'learning_button', 'background_checkbox', 'no_test_mode', 'no_tray',
+                'no_answering_ui', 'expiry_enforced', 'browser_list', 'browser_selected', 'identity_import',
+                'statistics_export', 'ocr_model', 'browser_launch', 'bundled_browser', 'learning_flow',
+                'twelve_full_flows', 'identity_isolation', 'browser_per_person', 'browser_closed_after_learning',
+                'outcome_files', 'outcome_format', 'browser_round_robin', 'learning_visits', 'confirmations',
+                'headless_browser', 'background_execution', 'desktop_background', 'foreground_mode',
+                'main_window_visible', 'execution_controls_locked', 'power_request_released',
                 'no_answering_fields', 'background_preserved_foreground')
     if result.returncode or not all(report.get(key) for key in expected):
         raise RuntimeError('最终 EXE 自检失败：'+json.dumps(report, ensure_ascii=False))

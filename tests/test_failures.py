@@ -1,8 +1,8 @@
 import asyncio
 import pytest
-from PySide6.QtWidgets import QApplication
 from justvedio.models import VideoOptions
-from justvedio.video import watch_playlist, watch_video, VideoFailure
+from justvedio.video import watch_playlist, watch_video
+from justvedio.expiry import EXPIRY_MESSAGE
 from test_flows import setup_worker, launch
 from test_integration import wait
 
@@ -47,18 +47,21 @@ def test_page_closed_during_playback_is_not_completed(local_site, chrome):
     asyncio.run(run())
 
 
-def test_expiry_during_video_cancels_and_releases_resources(local_site, chrome, tmp_path, monkeypatch):
+def test_expiry_during_learning_cancels_and_releases_resources(local_site, chrome, tmp_path, monkeypatch):
     origin, _ = local_site
-    app, worker, finished, errors = setup_worker(monkeypatch)
+    app, worker, finished, errors, launched = setup_worker(monkeypatch)
     try:
-        launch(worker, origin, chrome, tmp_path)
+        launch(worker, origin, chrome, tmp_path, count=3, lanes=1)
         wait(app, lambda: worker.last_store and worker.last_store.records[0].status == 'watching')
         monkeypatch.setattr('justvedio.controller.is_expired', lambda: True)
-        wait(app, lambda: not worker.isRunning())
-        assert errors and errors[-1] == '软件已过期，请联系1564532736@qq.com'
-        assert worker.last_store.records[0].status == 'stopped'
-        assert all(r.status == 'pending' for r in worker.last_store.records[1:])
-        assert worker.browser is None and not worker.sessions and not worker.power_guard.active
+        wait(app, lambda: not worker.isRunning(), 60)
+        assert errors and errors[-1] == EXPIRY_MESSAGE
+        records = worker.last_store.records
+        assert records[0].status == 'stopped'
+        assert all(r.status == 'pending' for r in records[1:])
+        assert all(item.process.poll() is not None for item in launched)
+        assert not worker.active_browsers and not worker.active_pages
+        assert not worker.power_guard.active
     finally:
         worker.shutdown()
         wait(app, lambda: not worker.isRunning())

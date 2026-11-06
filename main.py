@@ -43,6 +43,8 @@ def main():
             QMessageBox.critical(None, '软件已过期', EXPIRY_MESSAGE)
         return 1
     from justvedio.gui import MainWindow
+    from justvedio import paths
+    paths.ensure_folders()
     base = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).resolve().parent
     log_dir = base / 'results/logs'
     log_dir.mkdir(parents=True, exist_ok=True)

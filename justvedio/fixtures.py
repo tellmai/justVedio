@@ -11,7 +11,8 @@ PNG = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4
 class SyntheticSite:
     def __init__(self, media):
         state = self.state = {'posts': 0, 'names': {}, 'bad_captcha': False, 'home_visits': {},
-                              'watch_visits': [], 'bad_ids': set(), 'bad_video_ids': set()}
+                              'watch_visits': [], 'bad_ids': set(), 'bad_video_ids': set(),
+                              'learning_visits': [], 'confirmations': 0, 'no_learning_entry': set()}
         class Handler(BaseHTTPRequestHandler):
             def body(self, body, mime='text/html; charset=utf-8', cookie=''):
                 if isinstance(body, str):
@@ -28,7 +29,8 @@ class SyntheticSite:
                     pass
 
             def do_GET(self):
-                path = urlparse(self.path).path
+                parsed = urlparse(self.path)
+                path = parsed.path
                 token = self.headers.get('Cookie', '').split('person=')[-1].split(';')[0]
                 if path == '/exam/':
                     self.body('''<div id="districtGrid"><button class="district-card" aria-label="进入黔江区考试入口" onclick="location.href='/exam/qianjiang'"><span class="district-name">黔江区</span></button></div>''')
@@ -36,8 +38,28 @@ class SyntheticSite:
                     self.body(PNG, 'image/png')
                 elif path == '/exam/user/home':
                     state['home_visits'][token] = state['home_visits'].get(token, 0) + 1
+                    if parse_qs(parsed.query).get('done'):
+                        state['confirmations'] += 1
                     name = html.escape(state['names'].get(token, '错误会话'))
-                    self.body(f'<h1>您好，{name}</h1><a>个人资料</a><a id="video-link" href="/watch">观看视频</a>')
+                    entry = ('<p>暂无可学习任务</p>' if token in state['no_learning_entry'] else
+                             '<button id="start-learning" onclick="location.href=\'/learning\'">继续旁听学习</button>')
+                    self.body(f'<h1>您好，{name}</h1><a>个人资料</a>{entry}<a id="video-link" href="/watch">观看视频</a>')
+                elif path == '/learning':
+                    state['learning_visits'].append(token)
+                    self.body('''<h2>2026年度法治理论知识考试</h2>
+                    <a href="/exam/user/home">返回考生主页</a>
+                    <div style="position:relative;display:inline-block">
+                      <video muted controls preload="auto" src="/media" width="480" height="270"></video>
+                      <button id="play-overlay" style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:64px;height:64px;border-radius:50%">▶</button>
+                    </div>
+                    <button id="confirm" hidden>确认完成学习</button>
+                    <script>
+                    const v=document.querySelector('video');
+                    const overlay=document.querySelector('#play-overlay');
+                    overlay.onclick=()=>{overlay.hidden=true;v.play();};
+                    v.onended=()=>{document.querySelector('#confirm').hidden=false;};
+                    document.querySelector('#confirm').onclick=()=>{location.href='/exam/user/home?done=1';};
+                    </script>''')
                 elif path == '/media':
                     self.body(media.read_bytes(), 'video/webm')
                 elif path == '/watch':

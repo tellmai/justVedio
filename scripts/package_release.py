@@ -22,7 +22,7 @@ def main(source_only=False):
         app = DIST / f'v{VERSION}' / APP_NAME
         if not (app/f'{APP_NAME}.exe').is_file():
             raise RuntimeError('请先构建 EXE')
-        files = sorted(p for p in app.rglob('*') if p.is_file() and 'results' not in p.relative_to(app).parts)
+        files = sorted(p for p in app.rglob('*') if p.is_file() and not {'results', '人员信息', '学习完成', '学习失败'}.intersection(p.relative_to(app).parts))
         print('Creating portable ZIP:', len(files), 'files', flush=True)
         with zipfile.ZipFile(destination,'w',zipfile.ZIP_DEFLATED,compresslevel=6) as archive:
             for path in files:
@@ -32,7 +32,7 @@ def main(source_only=False):
             raise RuntimeError('ZIP 完整性验证失败')
     results = [checksum(destination)]
     source_zip = DIST / f'{APP_NAME}-Source-{VERSION}.zip'
-    excluded = {'.git', '.venv', '__pycache__', '.pytest_cache', 'build', 'dist', 'results', 'tools'}
+    excluded = {'.git', '.venv', '__pycache__', '.pytest_cache', 'build', 'dist', 'results', 'tools', '人员信息', '学习完成', '学习失败'}
     with zipfile.ZipFile(source_zip, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
         for path in sorted(ROOT.rglob('*')):
             relative = path.relative_to(ROOT)

@@ -131,14 +131,88 @@ def test_export_formula_like_names_remain_text(tmp_path):
 
 def test_export_video_only_preserves_values(tmp_path):
     store=BatchStore(tmp_path,people(1))
-    store.update(0,status='completed',stage='全部完成',videos_completed=2,progress=100,elapsed_seconds=38,reason='指定流程全部完成')
+    store.update(0,status='completed',stage='全部完成',browser='Google Chrome',videos_completed=2,progress=100,elapsed_seconds=38,reason='指定流程全部完成')
     wb=load_workbook(store.folder/'已完成信息统计.xlsx')
     try:
         rows=list(wb.active.values)
         headers=rows[0]
-        assert len(headers)==12 and headers[:3]==('所在的区县','姓名','身份证号')
+        assert len(headers)==13 and headers[:3]==('所在的区县','姓名','身份证号')
         assert not any('答题' in h or '得分' in h for h in headers)
         record=dict(zip(headers,rows[1]))
-        assert (record['已完成视频数'],record['观看用时(秒)'])==(2,38)
+        assert (record['浏览器'],record['已完成视频数'],record['观看用时(秒)'])==('Google Chrome',2,38)
     finally:
         wb.close()
+
+
+def lanes_people(n=6):
+    return people(n)
+
+
+def test_lane_runner_keeps_round_robin_order_and_one_active_per_lane(tmp_path):
+    async def scenario():
+        store = BatchStore(tmp_path, lanes_people())
+        runner = BatchRunner(store, BatchControl())
+        lanes = [[0, 3], [1, 4], [2, 5]]
+        entered, active, peak = [], {}, {}
+        async def perform(candidate, index, lane):
+            entered.append((lane, index))
+            active[lane] = active.get(lane, 0) + 1
+            peak[lane] = max(peak.get(lane, 0), active[lane])
+            await asyncio.sleep(.02)
+            active[lane] -= 1
+            return {'videos_completed': 1, 'elapsed_seconds': 1}
+        result = await runner.run_lanes(perform, lanes)
+        assert {lane: [index for found, index in entered if found == lane] for lane in range(3)} == {0: [0, 3], 1: [1, 4], 2: [2, 5]}
+        assert len(entered) == 6
+        assert peak == {0: 1, 1: 1, 2: 1}
+        assert result['completed'] == 6
+        assert all(record.status == 'completed' and record.browser == '' for record in store.records)
+    asyncio.run(scenario())
+
+
+def test_lane_stop_after_current_leaves_the_rest_pending(tmp_path):
+    async def scenario():
+        store = BatchStore(tmp_path, lanes_people())
+        control = BatchControl()
+        runner = BatchRunner(store, control)
+        gates = [asyncio.Event() for _ in range(3)]
+        entered = []
+        async def perform(candidate, index, lane):
+            entered.append(index)
+            await gates[lane].wait()
+        task = asyncio.create_task(runner.run_lanes(perform, [[0, 3], [1, 4], [2, 5]]))
+        while len(entered) < 3:
+            await asyncio.sleep(.01)
+        assert entered == [0, 1, 2]
+        control.after_current.set()
+        for gate in gates:
+            gate.set()
+        await task
+        assert [record.status for record in store.records] == ['completed'] * 3 + ['pending'] * 3
+    asyncio.run(scenario())
+
+
+def test_lane_pause_only_stops_new_people(tmp_path):
+    async def scenario():
+        store = BatchStore(tmp_path, lanes_people(4))
+        control = BatchControl()
+        runner = BatchRunner(store, control)
+        gates = [asyncio.Event() for _ in range(2)]
+        entered = []
+        async def perform(candidate, index, lane):
+            entered.append(index)
+            if index < 2:
+                await gates[lane].wait()
+        task = asyncio.create_task(runner.run_lanes(perform, [[0, 2], [1, 3]]))
+        while len(entered) < 2:
+            await asyncio.sleep(.01)
+        control.paused.set()
+        for gate in gates:
+            gate.set()
+        await asyncio.sleep(.15)
+        assert entered == [0, 1]
+        control.paused.clear()
+        await task
+        assert sorted(entered) == [0, 1, 2, 3]
+        assert all(record.status == 'completed' for record in store.records)
+    asyncio.run(scenario())

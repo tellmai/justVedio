@@ -4,6 +4,28 @@ from pathlib import Path
 from .models import Candidate, IdentityImport
 
 
+def load_identity_folder(path: str) -> IdentityImport:
+    """Merge every .xlsx identity sheet in one folder, rejecting duplicates."""
+    folder = Path(path)
+    files = sorted((item for item in folder.glob('*.xlsx') if item.is_file()), key=lambda item: item.name.casefold())
+    if not files:
+        raise ValueError("该文件夹中没有 .xlsx 身份表")
+    candidates, issues, rejected = [], [], []
+    seen = set()
+    for file in files:
+        result = load_identities(str(file))
+        issues.extend(f"{file.name}：{issue}" for issue in result.issues)
+        rejected.extend((candidate, f"{file.name}：{reason}") for candidate, reason in result.rejected)
+        for candidate in result.candidates:
+            if candidate.id_number in seen:
+                issues.append(f"{file.name}：第 {candidate.row} 行身份证号与其他文件重复，已拒绝")
+                rejected.append((candidate, "身份证号与其他文件重复，避免同一身份同时登录"))
+                continue
+            seen.add(candidate.id_number)
+            candidates.append(candidate)
+    return IdentityImport(candidates, issues, f"{len(files)} 个文件", rejected)
+
+
 def load_identities(path: str) -> IdentityImport:
     from openpyxl import load_workbook
 

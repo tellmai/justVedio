@@ -4,14 +4,16 @@ from datetime import datetime
 from pathlib import Path
 from PySide6.QtCore import QThread, QTimer, Qt, Signal, QUrl
 from PySide6.QtGui import QDesktopServices, QIcon
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QFileDialog,
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QFileDialog,
     QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow,
     QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy, QSpinBox,
     QSplitter, QTabWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget,
     QApplication, QScrollArea)
+from . import paths
 from .controller import BrowserWorker
-from .models import DEFAULT_URL, DEFAULT_VIDEO_URL, SiteConfig, VideoOptions
-from .importers import load_identities
+from .browsers import discover_browsers
+from .models import DEFAULT_URL, SiteConfig, VideoOptions
+from .importers import load_identities, load_identity_folder
 from .privacy import redact
 from .batch import LABELS, ACTIVE_STATUSES, status_text
 from .version import APP_NAME, VERSION
@@ -24,12 +26,13 @@ class ImportWorker(QThread):
     result = Signal(object)
     failed = Signal(str)
     progress = Signal(str)
-    def __init__(self, path, parent=None):
+    def __init__(self, path, folder=False, parent=None):
         super().__init__(parent)
         self.path = path
+        self.folder = folder
     def run(self):
         try:
-            result = load_identities(self.path)
+            result = load_identity_folder(self.path) if self.folder else load_identities(self.path)
             if self.isInterruptionRequested():
                 raise InterruptedError('已停止文件导入')
             self.result.emit(result)
@@ -45,7 +48,7 @@ class MainWindow(QMainWindow):
         self.import_worker = None
         self.busy = self.backend_ready = self._closing = self._allow_close = False
         self.result_folder = ""
-        self.batch_test_mode = None
+        self.batch_started_at = None
         self._expiry_notified = False
         self.setWindowTitle(f"{APP_NAME} v{VERSION} · 有效期至 {VALID_THROUGH}")
         available = QApplication.primaryScreen().availableGeometry()
@@ -70,6 +73,7 @@ class MainWindow(QMainWindow):
         self.expiry_timer=QTimer(self)
         self.expiry_timer.timeout.connect(self._check_expiry)
         self.expiry_timer.start(1000)
+        QTimer.singleShot(150, self._load_startup_identities)
 
     def _check_expiry(self):
         if not is_expired():
@@ -172,31 +176,10 @@ class MainWindow(QMainWindow):
         option_layout = QVBoxLayout(option)
         option_layout.setContentsMargins(12, 9, 12, 12)
         option_layout.setSpacing(3)
-        self.test_mode = Switch('启动测试')
-        self.test_mode.setObjectName('testModeSwitch')
-        self.test_mode.setChecked(False)
-        self.test_mode.setToolTip('仅切换执行流程：关闭时只验证登录并保留主页；开启后登录成功直接播放视频。视频设置始终可提前配置。')
-        self.test_mode.toggled.connect(self._controls)
-        option_layout.addWidget(self.test_mode)
-        self.mode_description = label('', 'modeDescription', True)
-        option_layout.addWidget(self.mode_description)
+        option_layout.addWidget(label('视频学习', 'stepTitle'))
+        option_layout.addWidget(label('登录后自动进入旁听学习、播放至结束并确认。', 'modeDescription', True))
         execution_layout.addWidget(option)
         execution_layout.addSpacing(10)
-        concurrency_row = QHBoxLayout()
-        concurrency_row.addWidget(label('并发数量', 'fieldLabel'))
-        concurrency_row.addStretch()
-        self.concurrency = QSpinBox()
-        self.concurrency.setObjectName('flowConcurrency')
-        self.concurrency.setRange(1, 30)
-        self.concurrency.setValue(int(self.settings.value('concurrency', 10)))
-        self.concurrency.setSuffix(' 路')
-        self.concurrency.setFixedWidth(88)
-        self.concurrency.setToolTip('每个身份从登录到所选流程结束共占一个名额，完成或失败后自动接入下一位。')
-        self.concurrency.valueChanged.connect(lambda _: self._render() if hasattr(self, 'tables') else None)
-        concurrency_row.addWidget(self.concurrency)
-        execution_layout.addLayout(concurrency_row)
-        execution_layout.addWidget(label('每个身份占用 1 路，结束后自动补位。', 'fieldHint', True))
-        execution_layout.addSpacing(8)
         divider = QFrame()
         divider.setObjectName('divider')
         divider.setFixedHeight(1)
@@ -209,6 +192,38 @@ class MainWindow(QMainWindow):
         self.background.toggled.connect(self._controls)
         execution_layout.addWidget(self.background)
         execution_layout.addWidget(label('主界面保持可见，可随时暂停或停止。', 'fieldHint', True))
+        execution_layout.addSpacing(10)
+        browser_card = QFrame()
+        browser_card.setObjectName('browserCard')
+        browser_layout = QVBoxLayout(browser_card)
+        browser_layout.setContentsMargins(12, 10, 12, 12)
+        browser_layout.setSpacing(6)
+        browser_head = QHBoxLayout()
+        browser_head.setSpacing(6)
+        browser_head.addWidget(label('浏览器', 'fieldLabel'))
+        browser_head.addStretch()
+        self.browser_count = label('', 'fieldHint')
+        browser_head.addWidget(self.browser_count)
+        browser_layout.addLayout(browser_head)
+        self.browser_list = QVBoxLayout()
+        self.browser_list.setSpacing(2)
+        browser_layout.addLayout(self.browser_list)
+        browser_actions = QHBoxLayout()
+        browser_actions.setSpacing(4)
+        self.browser_refresh = QPushButton('刷新')
+        self.browser_refresh.setProperty('role', 'quiet')
+        self.browser_refresh.setToolTip('重新检测本机可用浏览器')
+        self.browser_refresh.clicked.connect(self._load_browsers)
+        self.browser_select_all = QPushButton('全选')
+        self.browser_select_all.setProperty('role', 'quiet')
+        self.browser_select_all.setToolTip('勾选全部可用浏览器；身份按勾选顺序轮流分配')
+        self.browser_select_all.clicked.connect(self._toggle_all_browsers)
+        browser_actions.addWidget(self.browser_refresh)
+        browser_actions.addWidget(self.browser_select_all)
+        browser_actions.addStretch()
+        browser_layout.addLayout(browser_actions)
+        browser_layout.addWidget(label('每人一个新浏览器；学完后关闭浏览器并自动接同类型的下一位。', 'fieldHint', True))
+        execution_layout.addWidget(browser_card)
         execution_layout.addSpacing(12)
         workflow = QFrame()
         workflow.setObjectName('workflowCard')
@@ -217,9 +232,9 @@ class MainWindow(QMainWindow):
         workflow_layout.setSpacing(14)
         workflow_layout.addWidget(label('本次执行流程', 'fieldHint'))
         self.workflow_labels = []
-        for number, title, note in ((1, '身份登录', '独立会话 · 自动识别验证码'),
-                                    (2, '保留登录主页', '仅登录验证，不播放视频'),
-                                    (3, '保存结果并自动补位', '结果保存为 Excel 与 JSON')):
+        for number, title, note in ((1, '身份登录', '独立浏览器 · 自动识别验证码'),
+                                    (2, '旁听学习', '点击开始/继续旁听学习并播放'),
+                                    (3, '完成并记录', '确认后关闭浏览器，自动补位')):
             step = QHBoxLayout()
             step.setSpacing(10)
             number_label = label(str(number).zfill(2), 'stepNumber')
@@ -241,65 +256,36 @@ class MainWindow(QMainWindow):
         self.settings_tabs.addTab(self.settings_scroll, '执行')
 
         self.flow_settings, video_layout, video_scroll = page()
-        self.mode = QComboBox()
-        self.mode.addItem('直接打开视频网址', 'url')
-        self.mode.addItem('点击站内视频入口', 'link')
-        self.mode.setCurrentIndex(int(self.settings.value("mode", 0)))
-        field(video_layout, '观看入口', self.mode)
-        self.video_url = QLineEdit(self.settings.value("video_url", DEFAULT_VIDEO_URL))
-        field(video_layout, '测试视频网址', self.video_url)
-        self.entry = QLineEdit(self.settings.value("entry", ""))
-        self.entry.setPlaceholderText('例如 text=观看视频')
-        field(video_layout, '站内入口选择器', self.entry, '站内具体按钮适配可在后续配置。')
-        self.muted = QCheckBox("静音播放")
-        self.muted.setChecked(self.settings.value("muted", True, type=bool))
-        video_layout.addWidget(self.muted)
-        video_layout.addSpacing(8)
-        self.advanced_toggle = QCheckBox('高级设置：播放器与超时')
-        video_layout.addWidget(self.advanced_toggle)
-        advanced = QWidget()
-        extra = QVBoxLayout(advanced)
-        extra.setContentsMargins(0, 10, 0, 0)
-        extra.setSpacing(6)
-        self.media = QLineEdit(self.settings.value("media", "video, bwp-video"))
-        self.play = QLineEdit(self.settings.value("play", ""))
-        self.play.setPlaceholderText('留空时点击视频播放')
-        self.frame = QLineEdit(self.settings.value("frame", ""))
+        defaults = VideoOptions()
+        self.learning_entry = QLineEdit(self.settings.value('learning_entry', defaults.learning_entry_text))
+        self.learning_entry.setPlaceholderText('开始旁听学习|继续旁听学习')
+        field(video_layout, '学习入口文字', self.learning_entry, '登录后按文字查找入口；找不到即把该身份记为失败。')
+        self.play = QLineEdit(self.settings.value('play', ''))
+        self.play.setPlaceholderText('留空时自动点击视频中间的播放按钮')
+        field(video_layout, '播放按钮选择器', self.play)
+        self.confirm = QLineEdit(self.settings.value('confirm', defaults.confirm_text))
+        self.confirm.setPlaceholderText('确认完成学习|完成学习')
+        field(video_layout, '完成确认文字', self.confirm, '视频结束后如出现该按钮会自动点击；没有则不点击。')
+        self.home_text = QLineEdit(self.settings.value('home', defaults.home_text))
+        self.home_text.setPlaceholderText('返回考生主页|返回主页')
+        field(video_layout, '返回主页文字', self.home_text, '确认完成后返回考生主页，再关闭浏览器。')
+        self.media = QLineEdit(self.settings.value('media', defaults.video_selector))
+        field(video_layout, '视频元素', self.media)
+        self.frame = QLineEdit(self.settings.value('frame', ''))
         self.frame.setPlaceholderText('可选')
-        self.complete = QLineEdit(self.settings.value("complete", ""))
-        self.complete.setPlaceholderText('可选')
-        self.next_video = QLineEdit(self.settings.value("next", ""))
-        self.next_video.setPlaceholderText('可选，用于连续视频')
+        field(video_layout, '视频 iframe', self.frame)
         self.video_timeout = QSpinBox()
         self.video_timeout.setRange(1, 720)
-        self.video_timeout.setValue(int(self.settings.value("video_timeout", 120)))
+        self.video_timeout.setValue(int(self.settings.value('video_timeout', 120)))
         self.video_timeout.setSuffix(' 分钟')
-        self.stall_timeout = QSpinBox()
-        self.stall_timeout.setRange(5, 1800)
-        self.stall_timeout.setValue(int(self.settings.value("stall_timeout", 120)))
-        self.stall_timeout.setSuffix(' 秒')
-        for caption, control in (('视频元素', self.media), ('播放按钮', self.play),
-                                 ('视频 iframe', self.frame), ('平台完成标志', self.complete),
-                                 ('下一视频按钮', self.next_video), ('单视频最长等待', self.video_timeout),
-                                 ('停滞超时', self.stall_timeout)):
-            field(extra, caption, control)
-        video_layout.addWidget(advanced)
-        advanced.hide()
-        self.advanced_toggle.toggled.connect(advanced.setVisible)
-        self.mode.currentIndexChanged.connect(self._controls)
+        field(video_layout, '最长等待', self.video_timeout, '视频正常播放后不再操作浏览器，直到播放结束。')
         video_layout.addStretch()
-        video_layout.addWidget(label('开启“启动测试”后生效；以真实播放结束为完成依据。', 'fieldHint', True))
-        self.settings_tabs.addTab(video_scroll, '视频')
+        video_layout.addWidget(label('学完确认后关闭浏览器，并以浏览器关闭作为完成信号。', 'fieldHint', True))
+        self.settings_tabs.addTab(video_scroll, '学习')
 
         connection, connection_layout, connection_scroll = page()
         self.url = QLineEdit(self.settings.value('url', DEFAULT_URL))
         field(connection_layout, '登录入口', self.url)
-        self.chrome = QLineEdit(self.settings.value('chrome', ''))
-        self.chrome.setPlaceholderText('自动查找 Chrome / Edge')
-        self.chrome_button = QPushButton('浏览…')
-        self.chrome_button.setToolTip('选择浏览器 EXE')
-        self.chrome_button.clicked.connect(self._choose_chrome)
-        field(connection_layout, '浏览器', path_row(self.chrome, self.chrome_button), '留空自动发现，可使用随附浏览器。')
         base = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).resolve().parents[1]
         self.output = QLineEdit(self.settings.value('output', str(base / 'results')))
         self.output_button = QPushButton('浏览…')
@@ -307,7 +293,8 @@ class MainWindow(QMainWindow):
         self.output_button.clicked.connect(self._choose_output)
         field(connection_layout, '结果目录', path_row(self.output, self.output_button), '每个批次独立保存统计文件，可重新导出。')
         connection_layout.addStretch()
-        connection_layout.addWidget(label('每个身份使用独立会话，Cookie 与本地存储相互隔离。', 'fieldHint', True))
+        connection_layout.addWidget(label('每个身份使用独立浏览器与独立配置文件，互不影响。', 'fieldHint', True))
+        connection_layout.addWidget(label(f'启动时自动加载 {paths.identities_folder()} 下的所有 .xlsx；学习完成与失败记录分别写入 {paths.completed_folder()} 和 {paths.failed_folder()}。', 'fieldHint', True))
         self.settings_tabs.addTab(connection_scroll, '连接')
         self.inspect_button = QPushButton('环境检测')
         self.inspect_button.setIcon(icon('monitor'))
@@ -373,7 +360,7 @@ class MainWindow(QMainWindow):
             ('completed', '已完成', '暂无已完成的身份', '完成所选流程的身份会自动归入此处。'),
             ('failed', '失败 / 中止', '暂无失败或中止的身份', '异常记录会集中显示，方便查看原因并重试。')):
             table = PeopleTable(empty_title, empty_note)
-            table.setHorizontalHeaderLabels(['行号', '区县', '姓名', '身份证号（脱敏）', '状态', '步骤进度', '视频数', '结果 / 原因'])
+            table.setHorizontalHeaderLabels(['行号', '区县', '姓名', '身份证号（脱敏）', '浏览器', '状态', '步骤进度', '视频数', '结果 / 原因'])
             table.setEditTriggers(QAbstractItemView.NoEditTriggers)
             table.setSelectionBehavior(QAbstractItemView.SelectRows)
             table.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -386,7 +373,7 @@ class MainWindow(QMainWindow):
             heading.setSectionResizeMode(QHeaderView.Interactive)
             heading.setMinimumSectionSize(38)
             heading.setStretchLastSection(True)
-            for column, width in enumerate((44, 62, 86, 136, 100, 98, 56, 150)):
+            for column, width in enumerate((44, 62, 86, 136, 92, 100, 98, 56, 150)):
                 table.setColumnWidth(column, width)
             table.verticalHeader().setDefaultSectionSize(40)
             table.verticalHeader().hide()
@@ -484,7 +471,7 @@ class MainWindow(QMainWindow):
         self.stop_button = QPushButton("停止")
         self.stop_button.setObjectName('stopFlow')
         self.stop_button.setIcon(icon('stop', '#AD6262', 16))
-        self.start_button = QPushButton('启动登录验证')
+        self.start_button = QPushButton('启动视频学习')
         self.start_button.setObjectName('startWatch')
         self.start_button.setIcon(icon('play', '#FFFFFF', 16))
         self.start_button.setMinimumWidth(160)
@@ -497,57 +484,102 @@ class MainWindow(QMainWindow):
         layout.addWidget(command)
         for button in self.findChildren(QPushButton) + self.findChildren(QToolButton):
             button.setCursor(Qt.PointingHandCursor)
-        for edit in (self.url, self.chrome, self.output, self.video_url, self.entry):
+        for edit in (self.url, self.output, self.learning_entry, self.play, self.confirm, self.home_text, self.media, self.frame):
             edit.setToolTip(edit.text())
             edit.textChanged.connect(edit.setToolTip)
+        self.identity_summary.setText(f'启动时自动加载 {paths.identities_folder()}，或按 Ctrl+O 导入')
+        self.identity_summary.setToolTip(str(paths.identities_folder()))
         self.setStyleSheet(stylesheet())
+        self._load_browsers()
         self._render()
+
+    def _load_browsers(self, *_):
+        """Detect installed browsers and restore the saved selection."""
+        saved = self.settings.value('browsers', [])
+        if isinstance(saved, str):
+            saved = [saved]
+        saved = [str(path).casefold() for path in saved if path]
+        previous = [path for path, box in getattr(self, 'browser_boxes', {}).items() if box.isChecked()]
+        # A refresh keeps exactly what is checked now; the first build restores
+        # the saved preference instead.
+        wanted = [path.casefold() for path in previous] if hasattr(self, 'browser_boxes') else saved
+        try:
+            self.browser_choices = discover_browsers()
+        except Exception:
+            self.browser_choices = []
+        while self.browser_list.count():
+            item = self.browser_list.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.browser_boxes = {}
+        for index, choice in enumerate(self.browser_choices):
+            box = QCheckBox(choice.name)
+            box.setToolTip(choice.path)
+            box.setChecked(choice.path.casefold() in wanted if wanted else index == 0)
+            box.toggled.connect(self._browser_selection_changed)
+            self.browser_list.addWidget(box)
+            self.browser_boxes[choice.path] = box
+        if self.browser_choices and not any(box.isChecked() for box in self.browser_boxes.values()):
+            self.browser_boxes[self.browser_choices[0].path].setChecked(True)
+        self._browser_selection_changed()
+
+    def _selected_browsers(self):
+        boxes = getattr(self, 'browser_boxes', {})
+        return [choice for choice in getattr(self, 'browser_choices', []) if choice.path in boxes and boxes[choice.path].isChecked()]
+
+    def _browser_selection_changed(self, *_):
+        selected = self._selected_browsers()
+        if hasattr(self, 'browser_count'):
+            self.browser_count.setText(f"已选 {len(selected)} / {len(getattr(self, 'browser_choices', []))}")
+        if hasattr(self, 'start_button'):
+            self._controls()
+
+    def _toggle_all_browsers(self, *_):
+        boxes = list(getattr(self, 'browser_boxes', {}).values())
+        target = not all(box.isChecked() for box in boxes)
+        for box in boxes:
+            box.blockSignals(True)
+            box.setChecked(target)
+            box.blockSignals(False)
+        self._browser_selection_changed()
 
     def _toggle_log(self, expanded):
         self.log.setVisible(expanded)
         self.log_toggle.setText('收起' if expanded else '展开')
         self.log_toggle.setArrowType(Qt.UpArrow if expanded else Qt.DownArrow)
 
-    def _video_controls(self):
-        self.video_url.setEnabled(not self.busy and self.mode.currentData() == "url")
-        self.entry.setEnabled(not self.busy and self.mode.currentData() == "link")
-
     def _controls(self):
         if not hasattr(self,'start_button'):
             return
         locked = self.busy or self.import_worker is not None or self._closing
-        for widget in (self.url, self.chrome, self.chrome_button, self.output, self.output_button, self.mode, self.video_url, self.entry, self.concurrency, self.muted, self.media, self.play, self.frame, self.complete, self.next_video, self.video_timeout, self.stall_timeout, self.import_button, self.template_button):
+        for widget in (self.url, self.output, self.output_button, self.media, self.play, self.frame,
+                       self.learning_entry, self.confirm, self.home_text, self.video_timeout,
+                       self.import_button, self.template_button, self.browser_refresh, self.browser_select_all):
             widget.setEnabled(not locked)
-        self.test_mode.setEnabled(not locked)
+        for box in getattr(self, 'browser_boxes', {}).values():
+            box.setEnabled(not locked)
         self.background.setEnabled(not locked)
         self.flow_settings.setEnabled(not locked)
-        self.start_button.setEnabled(self.backend_ready and not locked and bool(self._remaining() or (not self.batch_records and self.rejected)))
-        same_batch=bool(self.batch_records) and self.batch_test_mode==self.test_mode.isChecked()
+        self.start_button.setEnabled(self.backend_ready and not locked and bool(self._selected_browsers()) and bool(self._remaining() or (not self.batch_records and self.rejected)))
+        same_batch=bool(self.batch_records)
         if self.busy:
             self.start_button.setText('正在执行…')
         elif same_batch and not self._remaining():
             self.start_button.setText('本批次已完成' if all(r.status == 'completed' for r in self.batch_records) else '无可重试身份')
         else:
-            self.start_button.setText('重试未完成身份' if same_batch else '启动测试' if self.test_mode.isChecked() else '启动登录验证')
+            self.start_button.setText('重试未完成身份' if same_batch else '启动视频学习')
         self.inspect_button.setEnabled(self.backend_ready and not locked)
         self.pause_button.setEnabled(self.busy and not self._closing)
         self.stop_button.setEnabled(self.busy and not self._closing)
         self.export_button.setEnabled(self.backend_ready and not locked and bool(self.result_folder))
         self.open_button.setEnabled(bool(self.result_folder))
-        if not locked:
-            self._video_controls()
         self._sync_presentation()
 
     def _sync_presentation(self):
-        testing = self.test_mode.isChecked()
-        self.mode_description.setText('开启后，登录成功直接观看视频至结束。' if testing else '当前只验证登录，成功后保留主页。')
-        title, note = self.workflow_labels[1]
-        title.setText('视频观看' if testing else '保留登录主页')
-        note.setText('正常播放至结束，再判定完成' if testing else '仅登录验证，不播放视频')
-        mode = '视频测试模式' if testing else '登录验证模式'
         execution = '后台执行' if self.background.isChecked() else '显示浏览器'
-        self.command_title.setText(f'{mode} · {execution}')
-        self.command_note.setText('身份登录 → 正常播放至结束 → 保存结果 → 自动补位' if testing else '完成登录后保留主页；前台模式可双击人员查看网页。')
+        self.command_title.setText(f'视频学习模式 · {execution}')
+        self.command_note.setText('身份登录 → 旁听学习 → 播放结束 → 确认并关闭浏览器 → 自动补位')
         if self._closing:
             text, tone = '正在关闭', 'neutral'
         elif self.import_worker is not None:
@@ -570,14 +602,14 @@ class MainWindow(QMainWindow):
             self.run_badge.style().polish(self.run_badge)
 
     def _remaining(self):
-        if not self.batch_records or self.batch_test_mode!=self.test_mode.isChecked():
+        if not self.batch_records:
             return self.candidates
-        valid = {c.row for c in self.candidates}
-        return [r.candidate for r in self.batch_records if r.status != "completed" and r.candidate.row in valid]
+        valid = {c.id_number for c in self.candidates}
+        return [r.candidate for r in self.batch_records if r.status != "completed" and r.candidate.id_number in valid]
 
     def _ready(self):
         self.backend_ready = True
-        self.show_status("就绪：关闭“启动测试”时仅验证登录并保留主页；开启后登录成功直接观看视频")
+        self.show_status("就绪：点击“启动视频学习”后按已勾选浏览器并发登录、旁听学习并自动补位")
         self._controls()
 
     def _backend_finished(self):
@@ -590,10 +622,6 @@ class MainWindow(QMainWindow):
         self.log.appendPlainText(f"{datetime.now():%H:%M:%S}  {text}")
         logging.getLogger("justvedio").info(text)
 
-    def _choose_chrome(self):
-        path, _ = QFileDialog.getOpenFileName(self, "选择浏览器", "", "程序 (*.exe)")
-        if path:
-            self.chrome.setText(path)
     def _choose_output(self):
         path = QFileDialog.getExistingDirectory(self, "选择结果目录", self.output.text())
         if path:
@@ -603,20 +631,15 @@ class MainWindow(QMainWindow):
         if path:
             self.import_file(path)
     def import_file(self, path):
-        self.import_worker = ImportWorker(path, self)
-        self.import_worker.result.connect(self.identities_loaded)
-        self.import_worker.failed.connect(self.show_status)
-        self.import_worker.finished.connect(self._import_finished)
-        self.import_worker.start()
-        self._controls()
+        self._start_import(path, False)
     def _import_finished(self):
         self.import_worker.deleteLater()
         self.import_worker = None
         self._controls()
     def identities_loaded(self, result):
         self.candidates, self.rejected, self.batch_records = result.candidates, result.rejected, []
-        self.batch_test_mode = None
-        self.identity_summary.setText(f"工作表 {result.sheet} · 可用 {len(result.candidates)} 人 · 拒绝 {len(result.rejected)} 行")
+        self.identity_summary.setText(f"{result.sheet} · 可用 {len(result.candidates)} 人 · 拒绝 {len(result.rejected)} 行")
+        self.identity_summary.setToolTip(f"{result.sheet} · 可用 {len(result.candidates)} 人 · 拒绝 {len(result.rejected)} 行")
         for issue in result.issues:
             self.show_status(issue)
         self._render()
@@ -639,32 +662,52 @@ class MainWindow(QMainWindow):
                 self.show_status("模板保存失败，请检查目标文件是否被占用")
 
     def _config(self):
-        config = SiteConfig(self.url.text().strip(), self.chrome.text().strip())
-        options = VideoOptions(concurrency=self.concurrency.value(), background=self.background.isChecked(), video_url=self.video_url.text().strip() if self.mode.currentData() == 'url' else '', entry_selector=self.entry.text().strip() if self.mode.currentData() == 'link' else '', video_selector=self.media.text().strip(), play_selector=self.play.text().strip(), frame_selector=self.frame.text().strip(), complete_selector=self.complete.text().strip(), next_selector=self.next_video.text().strip(), muted=self.muted.isChecked(), video_timeout_seconds=self.video_timeout.value()*60, stall_timeout_seconds=self.stall_timeout.value())
+        config = SiteConfig(self.url.text().strip())
+        options = VideoOptions(background=self.background.isChecked(),
+                               learning_entry_text=self.learning_entry.text().strip(),
+                               video_selector=self.media.text().strip(),
+                               play_selector=self.play.text().strip(),
+                               frame_selector=self.frame.text().strip(),
+                               confirm_text=self.confirm.text().strip(),
+                               home_text=self.home_text.text().strip(),
+                               video_timeout_seconds=self.video_timeout.value()*60)
         return config, options
     def _start(self, kind):
         if self._check_expiry():
             return
+        selected = self._selected_browsers()
         try:
             config, options = self._config()
             config.validate()
             options.validate_execution()
-            if kind == 'watch' and self.test_mode.isChecked():
-                options.validate(config)
-                if self.mode.currentData() == 'link' and not options.entry_selector:
-                    raise ValueError("请填写原网站内的视频入口选择器")
+            if kind == 'watch' and not selected:
+                raise ValueError("请至少勾选一个浏览器")
+            if kind == 'watch':
+                for value, label in ((options.learning_entry_text, '学习入口文字'), (options.confirm_text, '完成确认文字'),
+                                     (options.home_text, '返回主页文字'), (options.video_selector, '视频元素')):
+                    if not value:
+                        raise ValueError(f"{label}不能为空")
             if not self.output.text().strip():
                 raise ValueError("请填写结果目录")
         except ValueError as error:
             self.show_status(str(error))
             return
-        for key, value in {'url': config.url, 'chrome': config.chrome_path, 'output': self.output.text(), 'mode': self.mode.currentIndex(), 'video_url': self.video_url.text(), 'entry': self.entry.text(), 'concurrency': options.concurrency, 'background': options.background, 'muted': options.muted, 'media': options.video_selector, 'play': options.play_selector, 'frame': options.frame_selector, 'complete': options.complete_selector, 'next': options.next_selector, 'video_timeout': self.video_timeout.value(), 'stall_timeout': self.stall_timeout.value()}.items():
+        for key, value in {'url': config.url, 'output': self.output.text(), 'background': options.background,
+                           'learning_entry': options.learning_entry_text, 'media': options.video_selector,
+                           'play': options.play_selector, 'frame': options.frame_selector,
+                           'confirm': options.confirm_text, 'home': options.home_text,
+                           'video_timeout': self.video_timeout.value()}.items():
             self.settings.setValue(key, value)
+        if kind == 'watch':
+            self.settings.setValue('browsers', [choice.path for choice in selected])
         candidates = self._remaining() if kind == 'watch' else self.candidates
-        rejected = self.rejected if kind=='watch' and (not self.batch_records or self.batch_test_mode!=self.test_mode.isChecked()) else ()
+        rejected = self.rejected if kind == 'watch' and not self.batch_records else ()
+        self.batch_started_at = datetime.now()
         self.busy = True
         self.pause_button.setText("暂停补位")
-        self.backend.start_job(kind, config, candidates, self.output.text().strip(), rejected, options, test_mode=self.test_mode.isChecked())
+        self.backend.start_job(kind, config, candidates, self.output.text().strip(), rejected, options,
+                               browsers=selected if kind == 'watch' else (),
+                               started_at=self.batch_started_at)
         self._controls()
     def _pause(self):
         if self.backend.control.paused.is_set():
@@ -699,9 +742,27 @@ class MainWindow(QMainWindow):
         self._controls()
     def _batch_started(self, folder, records):
         self.result_folder, self.batch_records = folder, list(records)
-        self.batch_test_mode=self.test_mode.isChecked()
         self.result_location.setText(folder)
         self._render()
+    def _load_startup_identities(self):
+        folder = paths.identities_folder()
+        if not folder.is_dir():
+            return
+        if not any(folder.glob('*.xlsx')):
+            self.show_status(f"未发现身份表：把 .xlsx 放入 {folder}，或按 Ctrl+O 导入")
+            return
+        if self.candidates or self.batch_records:
+            return
+        self.import_folder(str(folder))
+    def import_folder(self, path):
+        self._start_import(path, True)
+    def _start_import(self, path, folder):
+        self.import_worker = ImportWorker(path, folder, self)
+        self.import_worker.result.connect(self.identities_loaded)
+        self.import_worker.failed.connect(self.show_status)
+        self.import_worker.finished.connect(self._import_finished)
+        self.import_worker.start()
+        self._controls()
     def _person_updated(self, record):
         if record.index < len(self.batch_records):
             previous = self.batch_records[record.index]
@@ -710,7 +771,7 @@ class MainWindow(QMainWindow):
                 for key, table in self.tables.items():
                     row = getattr(self, '_table_rows', {}).get(key, {}).get(record.index)
                     if row is not None:
-                        for col, value in ((5, f'{record.progress:.1f}%'), (6, str(record.videos_completed)), (7, record.reason)):
+                        for col, value in ((6, f'{record.progress:.1f}%'), (7, str(record.videos_completed)), (8, record.reason)):
                             table.setItem(row, col, self._table_item(value, record, col))
                 return
         self._render()
@@ -721,7 +782,7 @@ class MainWindow(QMainWindow):
         item.setData(Qt.UserRole, record.index)
         item.setData(Qt.UserRole + 1, record.status)
         item.setToolTip(value)
-        if column in (0, 6):
+        if column in (0, 7):
             item.setTextAlignment(Qt.AlignCenter)
         return item
 
@@ -739,7 +800,7 @@ class MainWindow(QMainWindow):
         for key, card in self.metrics.items():
             card.value.setText(str(values[key]))
             card.note.setText(notes[key])
-        self.counts.setText(f"待接入 {counts['pending']} 人 · 并发上限 {self.concurrency.value()}" if records else '导入后可查看各身份的实时进度')
+        self.counts.setText(f"待接入 {counts['pending']} 人 · 并发 {len(self._selected_browsers())} 路" if records else '导入后可查看各身份的实时进度')
         self.progress_caption.setText(f'已完成 {completed} / {total}')
         self.batch_progress.setValue(percent)
         self.batch_progress.setToolTip(f'已完成 {completed} 人，共 {total} 人（{percent}%）')
@@ -757,7 +818,7 @@ class MainWindow(QMainWindow):
                 self._table_rows[key] = {r.index: row for row, r in enumerate(subset)}
                 for row, r in enumerate(subset):
                     c = r.candidate
-                    for col, value in enumerate((str(c.row), c.district, c.name, c.masked_id, status_text(r), f'{r.progress:.1f}%', str(r.videos_completed), r.reason)):
+                    for col, value in enumerate((str(c.row), c.district, c.name, c.masked_id, r.browser, status_text(r), f'{r.progress:.1f}%', str(r.videos_completed), r.reason)):
                         table.setItem(row, col, self._table_item(value, r, col))
                 if selected_index in self._table_rows[key]:
                     table.selectRow(self._table_rows[key][selected_index])
@@ -782,10 +843,9 @@ class MainWindow(QMainWindow):
         self.expiry_timer.stop()
         if self.import_worker:
             self.import_worker.requestInterruption()
-        self.backend.stop_job()
-        self.backend.shutdown()
+        self.backend.begin_shutdown()
         self._controls()
-        self.show_status("正在关闭本软件创建的浏览器并保存状态…")
+        self.show_status("正在退出；已打开的浏览器保持运行，不会随软件关闭")
         self.close_timer = QTimer(self)
         self.close_timer.timeout.connect(self._finish_close)
         self.close_timer.start(100)

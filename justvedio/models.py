@@ -51,6 +51,8 @@ class SiteConfig:
 
 @dataclass(frozen=True)
 class VideoOptions:
+    # Retained for compatibility with the batch API; the worker replaces it
+    # with the number of selected browsers, which is a batch's real concurrency.
     concurrency: int = 10
     background: bool = True
     mode: str = "site"
@@ -64,6 +66,9 @@ class VideoOptions:
     next_selector: str = ""
     max_videos: int = 100
     muted: bool = True
+    learning_entry_text: str = "开始旁听学习|继续旁听学习"
+    confirm_text: str = "确认完成学习|完成学习"
+    home_text: str = "返回考生主页|返回主页"
     login_timeout_seconds: float = 180
     video_timeout_seconds: float = 7200
     stall_timeout_seconds: float = 120

@@ -22,27 +22,32 @@ def find_chrome() -> str:
 
 
 class SiteSession:
-    def __init__(self, playwright, config: SiteConfig, progress=lambda _: None, browser=None, pages=None):
+    def __init__(self, playwright, config: SiteConfig, progress=lambda _: None, browser=None, pages=None, context=None, page=None):
         self.playwright = playwright
         self.config = config
         self.progress = progress
         self.browser = browser
         self.owns_browser = browser is None
+        self.owns_context = context is None
         self.pages = pages
-        self.context = None
-        self.page = None
+        self.context = context
+        self.page = page
 
     async def open(self, headless=False):
         self.config.validate()
-        if self.browser is None:
-            self.browser, self.browser_choice = await launch_browser(
-                self.playwright, self.config.chrome_path, headless, self.progress)
-        if self.pages is None:
-            self.pages = BrowserPages(self.browser)
-        self.context = await self.pages.new_context(viewport={"width": 1280, "height": 900}, locale="zh-CN")
+        if self.context is None:
+            if self.browser is None:
+                self.browser, self.browser_choice = await launch_browser(
+                    self.playwright, self.config.chrome_path, headless, self.progress)
+            if self.pages is None:
+                self.pages = BrowserPages(self.browser)
+            self.context = await self.pages.new_context(viewport={"width": 1280, "height": 900}, locale="zh-CN")
+        elif self.page is None:
+            self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
         self.context.set_default_timeout(self.config.timeout_ms)
         self.context.set_default_navigation_timeout(self.config.timeout_ms)
-        self.page = await self.new_page()
+        if self.page is None:
+            self.page = await self.new_page()
         response = await self.page.goto(self.config.url, wait_until="domcontentloaded")
         self.check_origin()
         if response and response.status >= 400:
@@ -50,6 +55,8 @@ class SiteSession:
         await self.page.locator("#districtGrid .district-card").first.wait_for()
 
     async def new_page(self):
+        if self.pages is None:
+            return await self.context.new_page()
         return await self.pages.new_page(self.context)
 
     def check_origin(self):
@@ -218,7 +225,7 @@ class SiteSession:
 
     async def close(self):
         try:
-            if self.context:
+            if self.context and self.owns_context:
                 await self.context.close()
         finally:
             if self.browser and self.owns_browser:
