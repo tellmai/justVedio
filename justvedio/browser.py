@@ -21,6 +21,50 @@ def find_chrome() -> str:
     return choices[0].path if choices else ""
 
 
+FIRST_RUN_MARKERS = (
+    'Microsoft 尊重您的隐私', '欢迎使用 Microsoft Edge', '让我们完成设置',
+    '欢迎使用 Chrome', '首次运行', '欢迎使用',
+)
+
+
+async def dismiss_browser_first_run(page, progress=lambda _: None):
+    """Accept the Edge/Chrome first-run privacy page when a new profile shows it.
+
+    The launcher already starts at ``about:blank`` and passes Edge's first-run
+    switches, but enterprise policies and Edge updates can still inject the
+    privacy consent page. Clicking it here keeps login moving without asking
+    the user to touch the browser.
+    """
+    try:
+        url = (page.url or '').lower()
+        internal = url.startswith(('edge://', 'chrome://')) or 'ntp.msn' in url
+        text = ''
+        if internal or any(term in url for term in ('microsoft', 'msn', 'edge')):
+            try:
+                text = await page.locator('body').inner_text(timeout=1500)
+            except Exception:
+                text = ''
+        first_run = internal or any(marker in text for marker in FIRST_RUN_MARKERS)
+        if not first_run:
+            return False
+        labels = ('我接受', '接受并继续', '接受', '同意并继续', '全部拒绝',
+                  '开始使用', '继续', '跳过')
+        for label in labels:
+            for locator in (page.get_by_role('button', name=label, exact=True),
+                            page.get_by_text(label, exact=True)):
+                try:
+                    if await locator.count() and await locator.first.is_visible():
+                        await locator.first.click(timeout=4000)
+                        progress(f'已处理浏览器首次运行提示（{label}）')
+                        await asyncio.sleep(0.5)
+                        return True
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return False
+
+
 class SiteSession:
     def __init__(self, playwright, config: SiteConfig, progress=lambda _: None, browser=None, pages=None, context=None, page=None):
         self.playwright = playwright
@@ -48,8 +92,21 @@ class SiteSession:
         self.context.set_default_navigation_timeout(self.config.timeout_ms)
         if self.page is None:
             self.page = await self.new_page()
-        response = await self.page.goto(self.config.url, wait_until="domcontentloaded")
-        self.check_origin()
+        response = None
+        for attempt in range(2):
+            await dismiss_browser_first_run(self.page, self.progress)
+            try:
+                response = await self.page.goto(self.config.url, wait_until="domcontentloaded")
+            except Exception:
+                if attempt:
+                    raise
+                continue
+            try:
+                self.check_origin()
+                break
+            except LoginFailure:
+                if attempt:
+                    raise
         if response and response.status >= 400:
             raise LoginFailure(f"网站访问失败（HTTP {response.status}）")
         await self.page.locator("#districtGrid .district-card").first.wait_for()

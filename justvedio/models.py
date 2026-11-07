@@ -31,7 +31,7 @@ class IdentityImport:
 class SiteConfig:
     url: str = DEFAULT_URL
     chrome_path: str = ""
-    timeout_ms: int = 20000
+    timeout_ms: int = 30000
     allow_local_test: bool = False
 
     def validate(self):
@@ -67,8 +67,9 @@ class VideoOptions:
     max_videos: int = 100
     muted: bool = True
     learning_entry_text: str = "开始旁听学习|继续旁听学习"
-    confirm_text: str = "确认完成学习|完成学习"
+    confirm_text: str = "确认完成学习|完成学习|确认完成"
     home_text: str = "返回考生主页|返回主页"
+    post_completion_wait_seconds: float = 0
     login_timeout_seconds: float = 180
     video_timeout_seconds: float = 7200
     stall_timeout_seconds: float = 120
@@ -93,6 +94,9 @@ class VideoOptions:
         for value in (self.login_timeout_seconds, self.video_timeout_seconds, self.stall_timeout_seconds):
             if not math.isfinite(value) or value <= 0:
                 raise ValueError("超时时间必须是正数")
+        if (not math.isfinite(self.post_completion_wait_seconds)
+                or not 0 <= self.post_completion_wait_seconds <= 300):
+            raise ValueError("完成后停留时间须为 0–300 秒")
         if self.video_url:
             p = urlparse(self.video_url)
             local = config.allow_local_test and p.hostname in {"127.0.0.1", "localhost"}

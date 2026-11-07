@@ -6,6 +6,8 @@ from pathlib import Path
 IDENTITIES = '人员信息'
 COMPLETED = '学习完成'
 FAILED = '学习失败'
+RESULTS = 'results'
+LIFETIME_STATS = '学习累计统计.json'
 
 
 def application_base():
@@ -35,6 +37,14 @@ def completed_folder(base=None):
 
 def failed_folder(base=None):
     return _folder(FAILED, base)
+
+
+def results_folder(base=None):
+    return _folder(RESULTS, base)
+
+
+def lifetime_stats_file(base=None):
+    return results_folder(base) / LIFETIME_STATS
 
 
 def ensure_folders(base=None):

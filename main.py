@@ -12,12 +12,15 @@ def main():
     parser.add_argument('--smoke-test', metavar='OUTPUT_DIR', help='离线自检，不提交真实身份')
     parser.add_argument('--desktop-selftest', action='store_true', help='验收主界面保留、浏览器后台播放及前台模式')
     args = parser.parse_args()
+    from justvedio.expiry import is_expired
+    if is_expired():
+        # Stop silently: no window, dialog, log line or console output.
+        return 1
     if args.smoke_test and not args.desktop_selftest:
         os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
     from PySide6.QtCore import QTimer
     from PySide6.QtGui import QFont, QFontDatabase, QIcon
-    from PySide6.QtWidgets import QApplication, QMessageBox
-    from justvedio.expiry import is_expired, EXPIRY_MESSAGE
+    from PySide6.QtWidgets import QApplication
     from justvedio.version import APP_NAME, ORGANIZATION, VERSION
     from justvedio.privacy import redact
     app = QApplication.instance() or QApplication(sys.argv[:1])
@@ -34,14 +37,6 @@ def main():
         if families:
             family = families[0]
     app.setFont(QFont(family, 10))
-    if is_expired():
-        if args.smoke_test:
-            output = Path(args.smoke_test).resolve()
-            output.mkdir(parents=True, exist_ok=True)
-            (output/'gui-smoke.json').write_text(json.dumps({'ok': False, 'expired': True, 'message': EXPIRY_MESSAGE}, ensure_ascii=False), encoding='utf-8')
-        else:
-            QMessageBox.critical(None, '软件已过期', EXPIRY_MESSAGE)
-        return 1
     from justvedio.gui import MainWindow
     from justvedio import paths
     paths.ensure_folders()

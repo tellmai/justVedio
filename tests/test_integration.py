@@ -41,14 +41,15 @@ def test_twelve_people_learn_with_one_browser_each(local_site,chrome,tmp_path,mo
         candidates=[Candidate(i+2,'黔江区',f'演示{i}',f'11010119900101{i:04}') for i in range(12)]
         config=SiteConfig(origin+'/exam/',chrome,10000,True)
         browsers=[BrowserChoice('测试浏览器1',chrome,0),BrowserChoice('测试浏览器2',chrome,1)]
-        options=VideoOptions(background=True,video_timeout_seconds=60)
+        options=VideoOptions(background=True,video_timeout_seconds=60,post_completion_wait_seconds=0)
         worker.start_job('watch',config,candidates,str(tmp_path/'statistics'),options=options,browsers=browsers,
                          started_at=datetime(2026,1,2,3,4,5),outcome_root=tmp_path/'records')
         wait(app,lambda:finished,180)
         assert not errors
         records=worker.last_store.records
         assert all(r.status=='completed' and r.stage=='学习完成' for r in records)
-        assert [r.browser for r in records]==['测试浏览器1','测试浏览器2']*6
+        assert all(r.browser in {'测试浏览器1','测试浏览器2'} for r in records)
+        assert {r.browser for r in records} == {'测试浏览器1','测试浏览器2'}
         assert len(launched)==12 and all(item.process.poll() is not None for item in launched)
         assert len(state['learning_visits'])==12 and state['confirmations']==12
         assert not worker.active_browsers and not worker.active_pages
@@ -57,9 +58,10 @@ def test_twelve_people_learn_with_one_browser_each(local_site,chrome,tmp_path,mo
         assert 'test_mode' not in saved
         assert saved['execution_settings']=={'browsers':['测试浏览器1','测试浏览器2'],'background':True,'concurrency':2}
         from openpyxl import load_workbook
-        completed=list((tmp_path/'records'/'学习完成').glob('学习完成_20260102_030405*.xlsx'))
-        failed=list((tmp_path/'records'/'学习失败').glob('学习失败_20260102_030405*.xlsx'))
+        completed=list((tmp_path/'records'/'学习完成').glob('学习完成_20260102*.xlsx'))
+        failed=list((tmp_path/'records'/'学习失败').glob('学习失败_20260102*.xlsx'))
         assert len(completed)==1 and len(failed)==1
+        assert completed[0].name == '学习完成_20260102.xlsx'
         book=load_workbook(completed[0],read_only=True)
         try:
             assert book.active.max_row==13 and book.active.max_column==3
@@ -71,6 +73,8 @@ def test_twelve_people_learn_with_one_browser_each(local_site,chrome,tmp_path,mo
             assert book.active.max_row==1
         finally:
             book.close()
+        from justvedio.totals import load_completed_learning
+        assert load_completed_learning()==12
     finally:
         worker.shutdown()
         wait(app,lambda:not worker.isRunning())

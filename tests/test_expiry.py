@@ -18,28 +18,29 @@ def test_inclusive_end_date_and_pc_timezone(instant,expected):
     assert expiry.is_expired(datetime.fromisoformat(instant)) is expected
 
 
-def test_expired_entry_shows_contact_without_starting_window(monkeypatch):
+def test_expired_entry_exits_silently_without_any_message(monkeypatch, capsys):
     import main
-    app=QApplication.instance() or QApplication([])
     notices=[]
     monkeypatch.setattr('sys.argv',['justVedio'])
     monkeypatch.setattr(expiry,'is_expired',lambda:True)
-    monkeypatch.setattr(QMessageBox,'critical',lambda parent,title,text:notices.append((title,text)))
+    monkeypatch.setattr(QMessageBox,'critical',lambda *args,**kwargs:notices.append(args))
     monkeypatch.setattr('justvedio.gui.MainWindow',lambda:pytest.fail('Expired application must not create its main window'))
     assert main.main()==1
-    assert notices==[('软件已过期','软件已过期，请联系1564532736@qq.com')]
+    assert notices==[]
+    assert capsys.readouterr()==('','')
 
 
 @pytest.mark.parametrize('trigger',['timer','start'])
-def test_gui_expiry_blocks_operations_and_closes_worker(monkeypatch,trigger):
+def test_runtime_expiry_stops_and_closes_without_any_message(monkeypatch,trigger):
     app=QApplication.instance() or QApplication([])
     window=MainWindow()
     notices,calls=[],[]
     try:
         wait(app,lambda:window.backend_ready)
         assert window.expiry_timer.isActive()
+        assert '2027' not in window.windowTitle()
         monkeypatch.setattr('justvedio.gui.is_expired',lambda:True)
-        monkeypatch.setattr(QMessageBox,'critical',lambda parent,title,text:notices.append(text))
+        monkeypatch.setattr(QMessageBox,'critical',lambda *args,**kwargs:notices.append(args))
         monkeypatch.setattr(window.backend,'start_job',lambda *args,**kwargs:calls.append(args))
         if trigger=='timer':
             window.expiry_timer.timeout.emit()
@@ -47,9 +48,9 @@ def test_gui_expiry_blocks_operations_and_closes_worker(monkeypatch,trigger):
             window._start('inspect')
         wait(app,lambda:not window.backend.isRunning())
         window._finish_close()
-        assert not calls and window._closing and not window.expiry_timer.isActive()
-        assert notices==[expiry.EXPIRY_MESSAGE]
-        assert window._check_expiry() and notices==[expiry.EXPIRY_MESSAGE]
+        assert not calls and not notices
+        assert window._closing and not window.expiry_timer.isActive()
+        assert window._check_expiry() and not notices
     finally:
         window.close()
         wait(app,lambda:not window.backend.isRunning())

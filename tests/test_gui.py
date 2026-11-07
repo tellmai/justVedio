@@ -17,6 +17,12 @@ def test_ui_dispatch_retry_and_browser_columns(tmp_path, monkeypatch):
     calls = []
     try:
         wait(app, lambda: window.backend_ready)
+        assert window.lifetime_badge.text() == '累计完成学习 0 人次'
+        assert '2027' not in window.windowTitle()
+        window.backend.lifetime_updated.emit(3)
+        app.processEvents()
+        assert window.lifetime_badge.text() == '累计完成学习 3 人次'
+        assert '每次完成' in window.lifetime_badge.toolTip()
         assert window._selected_browsers()
         window.background.setChecked(True)
         monkeypatch.setattr(window.backend, 'start_job', lambda *args, **kwargs: calls.append((args, kwargs)))

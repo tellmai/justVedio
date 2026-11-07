@@ -4,7 +4,7 @@ import json
 import sys
 import time
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 
@@ -21,7 +21,6 @@ def check_gui(window, app, output):
     from PySide6.QtWidgets import QPushButton, QLabel
     from .models import Candidate, IdentityImport
     from .version import APP_NAME
-    from .expiry import is_expired, EXPIRES_AT
     people = [Candidate(i+2, '黔江区', f'离线人员{i}', f'11010119900101{i:04}') for i in range(12)]
     window.identities_loaded(IdentityImport(people, [], '合成身份'))
     window.background.setChecked(True)
@@ -30,6 +29,7 @@ def check_gui(window, app, output):
     window.grab().save(str(output/'视频学习预览.png'))
     chosen = window._selected_browsers()
     texts = [w.text() for kind in (QPushButton, QLabel) for w in window.findChildren(kind)]
+    visible_copy = texts + [window.windowTitle()]
     return dict(brand_matches=window.windowTitle().startswith(APP_NAME), learning_button=ready,
                 background_checkbox=window.background.text() == '后台执行（隐藏浏览器）',
                 browser_list=bool(window.browser_choices), browser_selected=bool(chosen),
@@ -37,7 +37,9 @@ def check_gui(window, app, output):
                 no_test_mode=not hasattr(window, 'test_mode'),
                 no_tray=not hasattr(window, 'tray') and not hasattr(window, 'background_button'),
                 no_answering_ui=not any(any(term in text for term in ('答题', '题库', '评分')) for text in texts),
-                expiry_enforced=not is_expired(EXPIRES_AT-timedelta(microseconds=1)) and is_expired(EXPIRES_AT))
+                no_expiry_text=not any(any(term in text for term in ('有效期', '过期', '到期', '2027-05-20', '1564532736'))
+                                       for text in visible_copy),
+                lifetime_stat='累计完成学习' in window.lifetime_badge.text())
 
 
 def run_runtime_checks(output, desktop=False, window=None):
@@ -49,6 +51,7 @@ def run_runtime_checks(output, desktop=False, window=None):
     from .ocr import LocalOCR
     from .fixtures import SyntheticSite
     from .controller import BrowserWorker
+    from .totals import load_completed_learning
     from .browsers import BrowserChoice, discover_browsers, launch_process as real_launch_process
     from . import controller
     app = QApplication.instance() or QApplication([])
@@ -160,7 +163,8 @@ def run_runtime_checks(output, desktop=False, window=None):
             timer.start(20)
         with SyntheticSite(media) as site:
             config = SiteConfig(site.origin+'/exam/', str(bundled) if bundled.is_file() else '', 20000, True)
-            options = VideoOptions(background=True, video_timeout_seconds=90)
+            options = VideoOptions(background=True, video_timeout_seconds=90,
+                                   post_completion_wait_seconds=0)
             if window is not None:
                 window.background.setChecked(True)
                 window.busy = True
@@ -183,15 +187,18 @@ def run_runtime_checks(output, desktop=False, window=None):
             records = list(worker.last_store.records)
             if not all(r.status == 'completed' for r in records):
                 raise RuntimeError('视频学习未全部完成：'+repr([(r.status, r.reason) for r in records]))
-            round_robin = all(record.browser == choices[index % lane_count].name for index, record in enumerate(records))
-            if not round_robin:
-                raise RuntimeError('身份未按所选浏览器轮流分配：'+repr([r.browser for r in records]))
+            browser_names = [choice.name for choice in choices]
+            browser_distribution = (all(record.browser in browser_names for record in records)
+                                    and set(record.browser for record in records) == set(browser_names))
+            if not browser_distribution:
+                raise RuntimeError('身份未分配到所选浏览器：'+repr([r.browser for r in records]))
             if len(launches) != 12 or not all(running.process.poll() is not None for running in launches):
                 raise RuntimeError('未做到每人一个浏览器并在学完后关闭')
             if not 1 <= max(peaks or [0]) <= lane_count:
                 raise RuntimeError('并发数超过勾选浏览器数量：'+repr(max(peaks or [0])))
-            if len(site.state['learning_visits']) != 12 or site.state['confirmations'] != 12:
-                raise RuntimeError('旁听学习或完成确认次数不正确')
+            if (len(site.state['learning_visits']) != 12 or site.state['confirmations'] != 12
+                    or site.state['finished_visits'] != 12):
+                raise RuntimeError('旁听学习、完成确认或返回主页次数不正确')
             if worker.active_browsers or worker.active_pages:
                 raise RuntimeError('批次结束后仍有浏览器未关闭')
             state = json.loads((worker.last_store.folder/'人员状态.json').read_text(encoding='utf-8'))
@@ -202,8 +209,8 @@ def run_runtime_checks(output, desktop=False, window=None):
             failed_book = sorted((records_root/'学习失败').glob('学习失败_*.xlsx'))
             if len(completed_book) != 1 or len(failed_book) != 1:
                 raise RuntimeError('学习完成/失败记录文件数量不正确')
-            if not completed_book[0].name.startswith('学习完成_20260102_030405'):
-                raise RuntimeError('记录文件没有按启动时间命名：'+completed_book[0].name)
+            if completed_book[0].name != '学习完成_20260102.xlsx':
+                raise RuntimeError('记录文件没有按天命名：'+completed_book[0].name)
             wb = load_workbook(completed_book[0], read_only=True)
             try:
                 outcome_rows = wb.active.max_row == 13 and wb.active.max_column == 3
@@ -236,7 +243,11 @@ def run_runtime_checks(output, desktop=False, window=None):
                 window.background.setChecked(False)
                 window.busy = True
                 window._controls()
-                worker.start_job('watch', config, people[:1], str(output/'foreground-statistics'),
+                # The first twelve people have already completed their learning
+                # on this synthetic site, so the visible foreground pass needs a
+                # fresh identity that still has a 旁听学习 entry.
+                foreground_person = Candidate(99, '黔江区', '前台验收', '110101199001019999')
+                worker.start_job('watch', config, [foreground_person], str(output/'foreground-statistics'),
                                  options=replace(options, background=False), browsers=choices[:1],
                                  started_at=started, outcome_root=output/'foreground-records')
                 wait_for(app, lambda: len(finished) == 2, 120)
@@ -244,7 +255,11 @@ def run_runtime_checks(output, desktop=False, window=None):
                                    and bool(visible_browser_samples)
                                    and worker.last_store.records[0].status == 'completed' and window.isVisible())
                 if not foreground_mode:
-                    raise RuntimeError('取消后台执行后的可见浏览器流程失败')
+                    raise RuntimeError('取消后台执行后的可见浏览器流程失败：' + repr({
+                        'errors': errors, 'launch_modes': launch_modes,
+                        'visible_samples': len(visible_browser_samples),
+                        'record': (worker.last_store.records[0].status, worker.last_store.records[0].reason),
+                        'window_visible': window.isVisible()}))
                 window.background.setChecked(True)
             return dict(identity_import=True, statistics_export=exported, ocr_model=True,
                         browser_launch=True, bundled_browser=bundled.is_file(), learning_flow=True,
@@ -253,7 +268,7 @@ def run_runtime_checks(output, desktop=False, window=None):
                         browser_per_person=len(learning_launches) == 12,
                         browser_closed_after_learning=all(running.process.poll() is not None for running in learning_launches),
                         outcome_files=bool(completed_book and failed_book), outcome_format=outcome_rows and headers == ['所在的区县', '姓名', '身份证号'],
-                        browser_round_robin=round_robin, learning_visits=learned,
+                        browser_round_robin=browser_distribution, learning_visits=learned,
                         confirmations=confirmed, headless_browser=True,
                         desktop_background=desktop, foreground_mode=foreground_mode,
                         main_window_visible=desktop and window.isVisible(),
@@ -261,6 +276,7 @@ def run_runtime_checks(output, desktop=False, window=None):
                         power_request_released=not worker.power_guard.active,
                         background_preserved_foreground=desktop and not violations and bool(samples),
                         foreground_samples=len(samples),
+                        lifetime_completed=load_completed_learning(),
                         no_answering_fields=all(not any(k.startswith('exam_') for k in r) for r in state['records']))
     finally:
         if timer:

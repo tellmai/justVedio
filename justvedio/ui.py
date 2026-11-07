@@ -262,7 +262,8 @@ def stylesheet():
     QMainWindow, QWidget#workspace { background: #F2F5F6; }
     QLabel { background: transparent; border: none; }
     QLabel#brandTitle { font-family: 'Segoe UI'; font-size: 25px; font-weight: 700; color: #183B43; }
-    QLabel#brandSubtitle, QLabel#expiryCaption { color: #7A8B96; font-size: 11px; }
+    QLabel#brandSubtitle { color: #7A8B96; font-size: 11px; }
+    QLabel#lifetimeBadge { background: #EAF2FB; color: #3775B1; border-radius: 11px; padding: 4px 11px; font-size: 11px; }
     QLabel#versionBadge { background: #E5ECEF; color: #68808E; border-radius: 5px; padding: 3px 8px; font-size: 11px; }
     QLabel#runBadge { background: #E7F4F0; color: #137E74; border-radius: 13px; padding: 6px 14px; font-size: 12px; }
     QLabel#runBadge[tone='neutral'] { background: #E5ECEF; color: #6D7E89; }

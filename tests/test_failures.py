@@ -2,7 +2,6 @@ import asyncio
 import pytest
 from justvedio.models import VideoOptions
 from justvedio.video import watch_playlist, watch_video
-from justvedio.expiry import EXPIRY_MESSAGE
 from test_flows import setup_worker, launch
 from test_integration import wait
 
@@ -47,7 +46,7 @@ def test_page_closed_during_playback_is_not_completed(local_site, chrome):
     asyncio.run(run())
 
 
-def test_expiry_during_learning_cancels_and_releases_resources(local_site, chrome, tmp_path, monkeypatch):
+def test_expiry_during_learning_stops_silently_and_releases_resources(local_site, chrome, tmp_path, monkeypatch):
     origin, _ = local_site
     app, worker, finished, errors, launched = setup_worker(monkeypatch)
     try:
@@ -55,7 +54,7 @@ def test_expiry_during_learning_cancels_and_releases_resources(local_site, chrom
         wait(app, lambda: worker.last_store and worker.last_store.records[0].status == 'watching')
         monkeypatch.setattr('justvedio.controller.is_expired', lambda: True)
         wait(app, lambda: not worker.isRunning(), 60)
-        assert errors and errors[-1] == EXPIRY_MESSAGE
+        assert not errors
         records = worker.last_store.records
         assert records[0].status == 'stopped'
         assert all(r.status == 'pending' for r in records[1:])

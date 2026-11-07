@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from justvedio.browser import SiteSession
+from justvedio.browser import SiteSession, dismiss_browser_first_run
 from justvedio.browser_pages import BrowserPages
 from justvedio.models import Candidate, SiteConfig
 
@@ -58,6 +58,25 @@ def test_concurrent_pages_background_refill_and_identity_isolation(local_site, c
                 assert len({c['browserContextId'] for c in commands}) == 5
                 await asyncio.gather(*(s.close() for s, _ in people[1:]), replacement.close())
                 assert not browser.contexts and not pages._context_ids
+            finally:
+                await browser.close()
+
+    asyncio.run(scenario())
+
+
+def test_browser_first_run_privacy_page_is_accepted(local_site, chrome):
+    origin, _ = local_site
+
+    async def scenario():
+        from playwright.async_api import async_playwright
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(executable_path=chrome, headless=True)
+            try:
+                page = await browser.new_page()
+                await page.goto(origin + '/microsoft/first-run')
+                assert await dismiss_browser_first_run(page)
+                assert await page.evaluate("document.body.dataset.accepted") == '1'
             finally:
                 await browser.close()
 

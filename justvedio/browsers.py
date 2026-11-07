@@ -81,8 +81,11 @@ def discover_browsers():
     choices, seen = [], set()
     for value in raw:
         path = executable_from_command(value)
-        key = path.casefold()
         name = Path(path).name.lower()
+        try:
+            key = str(Path(path).resolve()).casefold()
+        except OSError:
+            key = path.casefold()
         if path and name in KNOWN and key not in seen and Path(path).is_file():
             label, priority = KNOWN[name]
             choices.append(BrowserChoice(label, path, priority))
@@ -90,9 +93,13 @@ def discover_browsers():
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
     for relative in ("chrome/chrome-win64/chrome.exe", "tools/chrome/chrome-win64/chrome.exe"):
         path = base / relative
-        if path.is_file() and str(path).casefold() not in seen:
+        try:
+            key = str(path.resolve()).casefold()
+        except OSError:
+            key = str(path).casefold()
+        if path.is_file() and key not in seen:
             choices.append(BrowserChoice("随附 Chrome", str(path), 3))
-            seen.add(str(path).casefold())
+            seen.add(key)
     return sorted(choices, key=lambda item: item.priority)
 
 
@@ -111,10 +118,30 @@ async def launch_browser(playwright, explicit="", headless=False, progress=lambd
     raise ValueError("可用浏览器均启动失败，请检查软件文件或手动选择兼容浏览器程序")
 
 
-def _free_port():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(('127.0.0.1', 0))
-        return sock.getsockname()[1]
+def terminate_process_tree(process):
+    """Stop a browser and every helper process so no stray window remains."""
+    if process is None or process.poll() is not None:
+        return
+    try:
+        if sys.platform == 'win32':
+            subprocess.run(['taskkill', '/F', '/T', '/PID', str(process.pid)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+                           timeout=10)
+        else:
+            process.terminate()
+    except Exception:
+        try:
+            process.terminate()
+        except Exception:
+            pass
+    try:
+        process.wait(timeout=5)
+    except Exception:
+        try:
+            process.kill()
+        except Exception:
+            pass
 
 
 @dataclass
@@ -156,11 +183,7 @@ class RunningBrowser:
                 self._cleanup_files()
                 return True
             await asyncio.sleep(0.1)
-        try:
-            self.process.terminate()
-            self.process.wait(timeout=5)
-        except Exception:
-            pass
+        terminate_process_tree(self.process)
         self._cleanup_files()
         return self.process.poll() is not None
 
@@ -180,45 +203,100 @@ class RunningBrowser:
         shutil.rmtree(self.profile, ignore_errors=True)
 
 
-async def launch_process(playwright, choice, headless=False, progress=lambda _: None):
-    """Start a fresh browser with its own profile and connect over CDP."""
-    port = _free_port()
+async def launch_process(playwright, choice, headless=False, progress=lambda _: None, attempts=2):
+    """Start a browser, retrying transient Edge/Chrome startup failures.
+
+    Edge occasionally exits or misses the DevTools port during a cold start,
+    update, or antivirus scan. Each retry gets a fresh profile and port; the
+    first failure is cleaned up before the next attempt.
+    """
+    if not Path(choice.path).is_file():
+        raise ValueError(f'{choice.name} 浏览器程序不存在，请重新选择')
+    last_error = None
+    for attempt in range(max(1, attempts)):
+        try:
+            return await _launch_once(playwright, choice, headless, progress)
+        except Exception as error:
+            last_error = error
+            if attempt + 1 >= max(1, attempts):
+                raise
+            detail = str(error).split('\n')[0][:180]
+            progress(f'{choice.name} 启动失败，正在重试（{attempt + 2}/{attempts}）：{detail}')
+            await asyncio.sleep(0.8 + attempt * 0.5)
+    raise last_error
+
+
+async def _launch_once(playwright, choice, headless=False, progress=lambda _: None):
+    """One launch attempt with its own profile and browser-chosen debug port.
+
+    The browser publishes ``DevToolsActivePort``. This avoids two concurrent
+    lanes accidentally reserving the same port. ``about:blank`` also prevents
+    Edge from opening its first-run / NTP privacy page in a second window.
+    """
     profile = Path(tempfile.mkdtemp(prefix='justvedio-browser-'))
+    # Chromium uses this sentinel to remember that the first run is done.
+    try:
+        (profile / 'First Run').touch()
+    except OSError:
+        pass
     arguments = [
         choice.path,
         f'--user-data-dir={profile}',
-        f'--remote-debugging-port={port}',
+        '--remote-debugging-port=0',
+        '--remote-debugging-address=127.0.0.1',
         '--remote-allow-origins=*',
         '--no-first-run',
         '--no-default-browser-check',
+        '--no-service-autorun',
+        '--disable-sync',
+        '--disable-extensions',
+        '--disable-default-apps',
+        '--disable-component-update',
+        '--disable-features=msEdgeStartupBoost,msEdgeFirstRunExperience,CalculateNativeWinOcclusion',
         '--autoplay-policy=no-user-gesture-required',
+        '--disable-popup-blocking',
+        '--disable-notifications',
         '--disable-background-timer-throttling',
         '--disable-renderer-backgrounding',
         '--disable-backgrounding-occluded-windows',
         '--disable-session-crashed-bubble',
         '--hide-crash-restore-bubble',
+        '--disable-crash-reporter',
+        '--noerrdialogs',
         '--window-size=1280,900',
     ]
     if headless:
         arguments.append('--headless=new')
+        if 'msedge' in choice.path.lower():
+            # Edge's headless GPU path fails more often on some drivers.
+            arguments.append('--disable-gpu')
+    arguments.append('about:blank')
     creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
-    log_path = Path(tempfile.mkstemp(prefix='justvedio-chrome-', suffix='.log')[1])
+    log_fd, log_name = tempfile.mkstemp(prefix='justvedio-chrome-', suffix='.log')
+    os.close(log_fd)
+    log_path = Path(log_name)
     log_stream = log_path.open('wb')
     process = subprocess.Popen(arguments, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                stderr=log_stream, creationflags=creationflags)
-    deadline = time.monotonic() + 30
-    ready = False
+    deadline = time.monotonic() + 35
+    port = None
     last_error = ''
+    marker = profile / 'DevToolsActivePort'
     while time.monotonic() < deadline:
         if process.poll() is not None:
             break
         try:
-            with socket.create_connection(('127.0.0.1', port), timeout=1):
-                ready = True
+            lines = marker.read_text(encoding='utf-8', errors='replace').splitlines()
+            candidate = int(lines[0])
+            with socket.create_connection(('127.0.0.1', candidate), timeout=1):
+                port = candidate
                 break
+        except FileNotFoundError:
+            pass
         except Exception as error:
             last_error = f'{type(error).__name__}: {error}'
-            await asyncio.sleep(0.2)
+        await asyncio.sleep(0.2)
+    ready = port is not None
 
     def failure_detail():
         parts = []
@@ -234,12 +312,12 @@ async def launch_process(playwright, choice, headless=False, progress=lambda _: 
         return f'：{"；".join(parts)}' if parts else ''
 
     if not ready:
+        if process.poll() is not None:
+            last_error = last_error or f'浏览器进程提前退出（代码 {process.returncode}）'
+        else:
+            last_error = last_error or '浏览器未在限定时间内开放调试端口'
         detail = failure_detail()
-        try:
-            process.terminate()
-            process.wait(timeout=5)
-        except Exception:
-            pass
+        terminate_process_tree(process)
         try:
             log_stream.close()
             log_path.unlink(missing_ok=True)
@@ -248,14 +326,11 @@ async def launch_process(playwright, choice, headless=False, progress=lambda _: 
         shutil.rmtree(profile, ignore_errors=True)
         raise ValueError(f'{choice.name} 启动失败{detail}' if detail else f'{choice.name} 启动失败，请检查浏览器程序是否可用')
     try:
-        browser = await playwright.chromium.connect_over_cdp(f'http://127.0.0.1:{port}')
+        browser = await asyncio.wait_for(
+            playwright.chromium.connect_over_cdp(f'http://127.0.0.1:{port}'), timeout=20)
     except Exception as error:
         detail = failure_detail()
-        try:
-            process.terminate()
-            process.wait(timeout=5)
-        except Exception:
-            pass
+        terminate_process_tree(process)
         try:
             log_stream.close()
             log_path.unlink(missing_ok=True)

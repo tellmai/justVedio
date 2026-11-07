@@ -43,13 +43,13 @@ def main():
                             creationflags=subprocess.CREATE_NO_WINDOW)
     report = json.loads((output/'gui-smoke.json').read_text(encoding='utf-8'))
     expected = ('ok', 'frozen', 'brand_matches', 'learning_button', 'background_checkbox', 'no_test_mode', 'no_tray',
-                'no_answering_ui', 'expiry_enforced', 'browser_list', 'browser_selected', 'identity_import',
-                'statistics_export', 'ocr_model', 'browser_launch', 'bundled_browser', 'learning_flow',
-                'twelve_full_flows', 'identity_isolation', 'browser_per_person', 'browser_closed_after_learning',
-                'outcome_files', 'outcome_format', 'browser_round_robin', 'learning_visits', 'confirmations',
-                'headless_browser', 'background_execution', 'desktop_background', 'foreground_mode',
-                'main_window_visible', 'execution_controls_locked', 'power_request_released',
-                'no_answering_fields', 'background_preserved_foreground')
+                'no_answering_ui', 'no_expiry_text', 'lifetime_stat', 'browser_list', 'browser_selected',
+                'identity_import', 'statistics_export', 'ocr_model', 'browser_launch', 'bundled_browser',
+                'learning_flow', 'twelve_full_flows', 'identity_isolation', 'browser_per_person',
+                'browser_closed_after_learning', 'outcome_files', 'outcome_format', 'browser_round_robin',
+                'learning_visits', 'confirmations', 'headless_browser', 'background_execution', 'desktop_background',
+                'foreground_mode', 'main_window_visible', 'execution_controls_locked', 'power_request_released',
+                'lifetime_completed', 'no_answering_fields', 'background_preserved_foreground')
     if result.returncode or not all(report.get(key) for key in expected):
         raise RuntimeError('最终 EXE 自检失败：'+json.dumps(report, ensure_ascii=False))
     if report['app_name'] != APP_NAME or report['version'] != VERSION:

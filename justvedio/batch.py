@@ -31,19 +31,70 @@ class PersonResult:
     elapsed_seconds: float = 0
     stage: str = "登录验证"
     browser: str = ""
+    already_completed: bool = False
 
 
 class StatisticsError(RuntimeError):
     pass
 
 
+def build_records(candidates, rejected=(), prior=None, retry_incomplete=False):
+    """Build one deduplicated roster, optionally seeded by today's ledger.
+
+    Rejected duplicate rows whose identity is already represented by a valid
+    candidate are dropped so the same person never appears in both the
+    completed and failed lists. A completed status from today wins over a
+    rejected/failed row; failed/stopped rows stay visible until a retry.
+    """
+    prior = prior or {}
+    candidates = list(candidates)
+    valid_ids = {candidate.id_number for candidate in candidates}
+    filtered_rejected = []
+    seen_rejected = set()
+    for candidate, reason in rejected:
+        identity = candidate.id_number
+        if identity and (identity in valid_ids or identity in seen_rejected):
+            continue
+        if identity and (prior.get(identity) or {}).get("status") == "completed":
+            continue
+        if identity:
+            seen_rejected.add(identity)
+        filtered_rejected.append((candidate, reason))
+    pairs = sorted([(c, "") for c in candidates] + filtered_rejected, key=lambda pair: pair[0].row)
+    records = []
+    for index, (candidate, import_reason) in enumerate(pairs):
+        info = prior.get(candidate.id_number) or {}
+        status = "failed" if import_reason else "pending"
+        reason = import_reason
+        stage = "导入失败" if import_reason else "登录验证"
+        ended = now() if import_reason else ""
+        progress = 0
+        already_completed = False
+        if info.get("status") == "completed":
+            status = "completed"
+            reason = "本日已完成，跳过" if info.get("source") != "already" else "已是完成状态，无需再次学习"
+            stage = "学习完成"
+            ended = info.get("updated") or ended
+            progress = 100
+            already_completed = info.get("source") == "already"
+        elif info.get("status") == "failed" and not retry_incomplete and not import_reason:
+            status = "failed"
+            reason = info.get("reason") or "本日未完成"
+            stage = "登录验证"
+            ended = info.get("updated") or ended
+        records.append(PersonResult(index, candidate, status, reason, ended=ended,
+                                    progress=progress, stage=stage,
+                                    already_completed=already_completed))
+    return records
+
+
 class BatchStore:
-    def __init__(self, root, candidates, rejected=()):
+    def __init__(self, root, candidates, rejected=(), prior=None, retry_incomplete=False):
         self.flow_kind = 'learning'
         self.execution_settings = None
+        self.day = None
         self.folder = Path(root).resolve() / f"学习批次_{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}"
-        pairs = sorted([(c, "") for c in candidates] + list(rejected), key=lambda p: p[0].row)
-        self.records = [PersonResult(i, c, "failed" if reason else "pending", reason, ended=now() if reason else "") for i, (c, reason) in enumerate(pairs)]
+        self.records = build_records(candidates, rejected, prior, retry_incomplete)
 
     def update(self, index, persist=True, **changes):
         self.records[index] = replace(self.records[index], **changes)
@@ -57,7 +108,10 @@ class BatchStore:
             target = self.folder / "人员状态.json"
             temporary = target.with_suffix(".json.tmp")
             with temporary.open("w", encoding="utf-8") as stream:
-                json.dump({"version": 5, "application": "justVedio", "flow": self.flow_kind, "execution_settings": self.execution_settings, "stage": "登录→旁听学习", "updated": now(), "records": [asdict(r) for r in self.records]}, stream, ensure_ascii=False, indent=2)
+                json.dump({"version": 5, "application": "justVedio", "flow": self.flow_kind,
+                           "day": self.day, "execution_settings": self.execution_settings,
+                           "stage": "登录→旁听学习", "updated": now(),
+                           "records": [asdict(r) for r in self.records]}, stream, ensure_ascii=False, indent=2)
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, target)
@@ -140,11 +194,26 @@ class BatchRunner:
         except StatisticsError:
             raise
         except Exception as error:
-            from playwright.async_api import Error as PlaywrightError
-            message = "页面超时、浏览器已关闭或页面操作失败" if isinstance(error, PlaywrightError) else str(error)
+            from playwright.async_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
+            if isinstance(error, PlaywrightTimeoutError):
+                message = "页面操作超时，请检查浏览器窗口是否被遮挡、网络是否稳定"
+            elif isinstance(error, PlaywrightError):
+                message = "浏览器或页面已关闭，操作失败"
+            else:
+                message = str(error)
             self.update(index, status="failed", reason=redact(message, (candidate.name, candidate.id_number)), ended=now())
         else:
-            self.update(index, status="completed", stage="学习完成", reason="视频学习完成，浏览器已关闭", progress=100, ended=now(), **(outcome or {}))
+            outcome = dict(outcome or {})
+            already_completed = bool(outcome.pop("already_completed", False))
+            browser_closed = bool(outcome.pop("browser_closed", True))
+            if already_completed:
+                reason = "已是完成状态，无需再次学习"
+            elif browser_closed:
+                reason = "视频学习完成，浏览器已关闭"
+            else:
+                reason = "视频学习完成，浏览器保留（停止设置）"
+            self.update(index, status="completed", stage="学习完成", reason=reason,
+                        progress=100, ended=now(), already_completed=already_completed, **outcome)
 
     async def _gather(self, tasks):
         try:
@@ -198,6 +267,39 @@ class BatchRunner:
                  for lane, indexes in enumerate(lanes) if indexes]
         if tasks:
             await self._gather(tasks)
+        return self.counts()
+
+    async def run_workers(self, perform, workers, labels=None, lane_available=None):
+        """Keep every selected browser busy with a shared, work-stealing queue.
+
+        A worker that finishes (or fails) a person immediately takes the next
+        pending identity instead of waiting for the other lane's original
+        people. ``lane_available`` lets the caller retire a lane whose browser
+        could not be launched, so it cannot rapidly fail the whole queue.
+        """
+        self.store.persist()
+        pending = [record.index for record in self.store.records if record.status == "pending"]
+        cursor = 0
+
+        async def worker(lane):
+            nonlocal cursor
+            while True:
+                if lane_available is not None and not lane_available(lane):
+                    return
+                if not await self._wait_until_allowed():
+                    return
+                if cursor >= len(pending):
+                    return
+                index = pending[cursor]
+                cursor += 1
+                if labels:
+                    self.update(index, browser=labels[lane % len(labels)])
+                await self._one(perform, index, lane)
+                if lane_available is not None and not lane_available(lane):
+                    return
+
+        tasks = [asyncio.create_task(worker(lane)) for lane in range(max(1, workers))]
+        await self._gather(tasks)
         return self.counts()
 
     def counts(self):

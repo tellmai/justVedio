@@ -15,10 +15,12 @@ from .browsers import discover_browsers
 from .models import DEFAULT_URL, SiteConfig, VideoOptions
 from .importers import load_identities, load_identity_folder
 from .privacy import redact
-from .batch import LABELS, ACTIVE_STATUSES, status_text
+from .batch import LABELS, ACTIVE_STATUSES, build_records, status_text
 from .version import APP_NAME, VERSION
 from .settings import application_settings
-from .expiry import is_expired, EXPIRY_MESSAGE, VALID_THROUGH
+from .expiry import is_expired
+from .totals import load_completed_learning
+from .daily import day_key, load_day
 from .ui import ElidedLabel, MetricCard, PeopleTable, Switch, icon, stylesheet
 
 
@@ -49,8 +51,9 @@ class MainWindow(QMainWindow):
         self.busy = self.backend_ready = self._closing = self._allow_close = False
         self.result_folder = ""
         self.batch_started_at = None
-        self._expiry_notified = False
-        self.setWindowTitle(f"{APP_NAME} v{VERSION} · 有效期至 {VALID_THROUGH}")
+        self._expiry_handled = False
+        self.learning_total = load_completed_learning()
+        self.setWindowTitle(f"{APP_NAME} v{VERSION}")
         available = QApplication.primaryScreen().availableGeometry()
         self.setMinimumSize(min(820, available.width()), min(620, available.height()))
         self.resize(min(1180, available.width()), min(900, available.height()))
@@ -66,6 +69,7 @@ class MainWindow(QMainWindow):
         self.backend.person_updated.connect(self._person_updated)
         self.backend.batch_finished.connect(lambda _: self._render())
         self.backend.job_finished.connect(self._finished)
+        self.backend.lifetime_updated.connect(self._lifetime_updated)
         self.backend.check_result.connect(lambda label, ok, detail: self.show_status(f"{label}：{'通过' if ok else '未通过'} · {detail}"))
         self.backend.finished.connect(self._backend_finished)
         self.backend.start()
@@ -78,12 +82,16 @@ class MainWindow(QMainWindow):
     def _check_expiry(self):
         if not is_expired():
             return False
-        if not self._expiry_notified:
-            self._expiry_notified=True
+        if not self._expiry_handled:
+            self._expiry_handled = True
             self.expiry_timer.stop()
+            self.hide()
             self.close()
-            QMessageBox.critical(self,'软件已过期',EXPIRY_MESSAGE)
         return True
+
+    def _lifetime_updated(self, total):
+        self.learning_total = max(0, int(total))
+        self.lifetime_badge.setText(f'累计完成学习 {self.learning_total} 人次')
 
     def _build_ui(self):
         root = QWidget()
@@ -148,7 +156,9 @@ class MainWindow(QMainWindow):
         system.setSpacing(5)
         self.run_badge = label('●  正在初始化', 'runBadge')
         system.addWidget(self.run_badge, 0, Qt.AlignRight)
-        system.addWidget(label(f'有效期至 {VALID_THROUGH}', 'expiryCaption'), 0, Qt.AlignRight)
+        self.lifetime_badge = label(f'累计完成学习 {self.learning_total} 人次', 'lifetimeBadge')
+        self.lifetime_badge.setToolTip('历次学习完成累加；同一人每次完成学习都会计入')
+        system.addWidget(self.lifetime_badge, 0, Qt.AlignRight)
         header.addLayout(system)
         layout.addLayout(header)
 
@@ -264,7 +274,7 @@ class MainWindow(QMainWindow):
         self.play.setPlaceholderText('留空时自动点击视频中间的播放按钮')
         field(video_layout, '播放按钮选择器', self.play)
         self.confirm = QLineEdit(self.settings.value('confirm', defaults.confirm_text))
-        self.confirm.setPlaceholderText('确认完成学习|完成学习')
+        self.confirm.setPlaceholderText('确认完成学习|完成学习|确认完成')
         field(video_layout, '完成确认文字', self.confirm, '视频结束后如出现该按钮会自动点击；没有则不点击。')
         self.home_text = QLineEdit(self.settings.value('home', defaults.home_text))
         self.home_text.setPlaceholderText('返回考生主页|返回主页')
@@ -280,7 +290,7 @@ class MainWindow(QMainWindow):
         self.video_timeout.setSuffix(' 分钟')
         field(video_layout, '最长等待', self.video_timeout, '视频正常播放后不再操作浏览器，直到播放结束。')
         video_layout.addStretch()
-        video_layout.addWidget(label('学完确认后关闭浏览器，并以浏览器关闭作为完成信号。', 'fieldHint', True))
+        video_layout.addWidget(label('确认完成并返回主页后立即关闭浏览器，再接入下一位。', 'fieldHint', True))
         self.settings_tabs.addTab(video_scroll, '学习')
 
         connection, connection_layout, connection_scroll = page()
@@ -555,20 +565,27 @@ class MainWindow(QMainWindow):
         locked = self.busy or self.import_worker is not None or self._closing
         for widget in (self.url, self.output, self.output_button, self.media, self.play, self.frame,
                        self.learning_entry, self.confirm, self.home_text, self.video_timeout,
-                       self.import_button, self.template_button, self.browser_refresh, self.browser_select_all):
+                       self.import_button, self.template_button,
+                       self.browser_refresh, self.browser_select_all):
             widget.setEnabled(not locked)
         for box in getattr(self, 'browser_boxes', {}).values():
             box.setEnabled(not locked)
         self.background.setEnabled(not locked)
         self.flow_settings.setEnabled(not locked)
-        self.start_button.setEnabled(self.backend_ready and not locked and bool(self._selected_browsers()) and bool(self._remaining() or (not self.batch_records and self.rejected)))
+        self.start_button.setEnabled(self.backend_ready and not locked and bool(self._selected_browsers()) and bool(self._remaining()))
         same_batch=bool(self.batch_records)
+        has_failed = any(r.status in {'failed', 'stopped'} for r in self.batch_records)
+        has_completed = any(r.status == 'completed' for r in self.batch_records)
         if self.busy:
             self.start_button.setText('正在执行…')
         elif same_batch and not self._remaining():
-            self.start_button.setText('本批次已完成' if all(r.status == 'completed' for r in self.batch_records) else '无可重试身份')
+            self.start_button.setText('本日学习已完成' if all(r.status == 'completed' for r in self.batch_records) else '无待学习身份')
+        elif same_batch and has_failed:
+            self.start_button.setText('重试未完成身份')
+        elif same_batch and has_completed:
+            self.start_button.setText('继续本日学习')
         else:
-            self.start_button.setText('重试未完成身份' if same_batch else '启动视频学习')
+            self.start_button.setText('启动视频学习')
         self.inspect_button.setEnabled(self.backend_ready and not locked)
         self.pause_button.setEnabled(self.busy and not self._closing)
         self.stop_button.setEnabled(self.busy and not self._closing)
@@ -637,9 +654,19 @@ class MainWindow(QMainWindow):
         self.import_worker = None
         self._controls()
     def identities_loaded(self, result):
-        self.candidates, self.rejected, self.batch_records = result.candidates, result.rejected, []
-        self.identity_summary.setText(f"{result.sheet} · 可用 {len(result.candidates)} 人 · 拒绝 {len(result.rejected)} 行")
-        self.identity_summary.setToolTip(f"{result.sheet} · 可用 {len(result.candidates)} 人 · 拒绝 {len(result.rejected)} 行")
+        self.candidates, self.rejected = result.candidates, result.rejected
+        try:
+            prior = load_day(day_key())
+        except Exception:
+            prior = {}
+        self.batch_records = build_records(result.candidates, result.rejected, prior)
+        completed = sum(record.status == 'completed' for record in self.batch_records)
+        summary = f"{result.sheet} · 可用 {len(result.candidates)} 人"
+        if completed:
+            summary += f" · 本日已完成 {completed} 人"
+        summary += f" · 拒绝 {len(result.rejected)} 行"
+        self.identity_summary.setText(summary)
+        self.identity_summary.setToolTip(summary)
         for issue in result.issues:
             self.show_status(issue)
         self._render()
@@ -700,8 +727,10 @@ class MainWindow(QMainWindow):
             self.settings.setValue(key, value)
         if kind == 'watch':
             self.settings.setValue('browsers', [choice.path for choice in selected])
-        candidates = self._remaining() if kind == 'watch' else self.candidates
-        rejected = self.rejected if kind == 'watch' and not self.batch_records else ()
+        # Pass the whole daily roster; completed people are seeded from the
+        # daily ledger and skipped, failed people become pending for a retry.
+        candidates = self.candidates
+        rejected = self.rejected if kind == 'watch' else ()
         self.batch_started_at = datetime.now()
         self.busy = True
         self.pause_button.setText("暂停补位")
@@ -723,16 +752,17 @@ class MainWindow(QMainWindow):
         self.backend.pause_queue()
         box = QMessageBox(self)
         box.setWindowTitle("停止流程")
-        box.setText("可等待当前所有身份完成登录及视频，或立即关闭当前会话。")
+        box.setText("可等待当前所有身份完成，或立即停止。停止后不会关闭已经打开的浏览器。")
         graceful = box.addButton("当前全部完成后停止", QMessageBox.AcceptRole)
         immediate = box.addButton("立即停止", QMessageBox.DestructiveRole)
         box.addButton("取消", QMessageBox.RejectRole)
         box.exec()
         if box.clickedButton() == graceful:
             self.backend.stop_after_current()
-            self.show_status("停止接入后续身份，等待当前所有身份完成")
+            self.show_status("停止接入后续身份，等待当前所有身份完成；已打开的浏览器将保留")
         elif box.clickedButton() == immediate:
             self.backend.stop_job()
+            self.show_status("已请求立即停止；已打开的浏览器将保留")
         elif self.pause_button.text() != "恢复补位":
             self.backend.resume_queue()
     def _finished(self):

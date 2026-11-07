@@ -70,6 +70,29 @@ def test_stop_preserves_all_active_and_pending(tmp_path, immediate):
         assert not any(r['status'] in {'running','watching'} for r in saved['records'])
     asyncio.run(scenario())
 
+def test_workers_share_queue_and_fast_lane_pulls_pending(tmp_path):
+    async def scenario():
+        store = BatchStore(tmp_path, people(4))
+        runner = BatchRunner(store, BatchControl())
+        entered, gate = [], asyncio.Event()
+        async def perform(c, index, lane):
+            entered.append((lane, index))
+            if index == 0:
+                await gate.wait()
+        task = asyncio.create_task(runner.run_workers(perform, 2, labels=['浏览器A', '浏览器B']))
+        for _ in range(200):
+            if len(entered) == 4:
+                break
+            await asyncio.sleep(.01)
+        assert len(entered) == 4
+        assert {lane for lane, _ in entered} == {0, 1}
+        gate.set()
+        result = await task
+        assert result['completed'] == 4
+        assert {record.browser for record in store.records} == {'浏览器A', '浏览器B'}
+    asyncio.run(scenario())
+
+
 def test_one_failure_does_not_block_next_and_identity_redacted(tmp_path):
     store = BatchStore(tmp_path, people(4))
     async def perform(c, i):
